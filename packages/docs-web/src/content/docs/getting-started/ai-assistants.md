@@ -240,6 +240,10 @@ assistants:
       - /absolute/path/to/other/repo
 ```
 
+### Running out of Codex quota
+
+If you also have OpenCode set up, `workflows.quotaFallback.codex` can replay a tier node on an OpenCode model when Codex reports its quota is exhausted, as long as the Codex attempt had not yet done anything outside its own turn. See [Codex quota fallback to OpenCode](/reference/configuration/#codex-quota-fallback-to-opencode).
+
 ### Set as Default (Optional)
 
 If you want Codex to be the default AI assistant for new conversations without codebase context, set this environment variable:

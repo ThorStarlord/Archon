@@ -61,7 +61,12 @@ mock.module('@openai/codex-sdk', () => ({
   Codex: MockCodex,
 }));
 
-import { CodexProvider, classifyCodexError, resetCodexSingleton } from './provider';
+import {
+  CodexProvider,
+  classifyCodexError,
+  isCodexQuotaExhaustion,
+  resetCodexSingleton,
+} from './provider';
 
 describe('CodexProvider', () => {
   let client: CodexProvider;
@@ -1939,6 +1944,80 @@ describe('CodexProvider', () => {
       );
     });
 
+    test('turn.failed on exhausted Codex credits carries a typed quota_exhausted failure', async () => {
+      mockRunStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield { type: 'turn.failed', error: { message: 'Your workspace is out of credits' } };
+        })(),
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        {
+          type: 'result',
+          sessionId: 'new-thread-id',
+          isError: true,
+          errorSubtype: 'codex_turn_failed',
+          errors: ['Your workspace is out of credits'],
+          failure: { class: 'quota_exhausted', evidence: 'Your workspace is out of credits' },
+        },
+      ]);
+    });
+
+    test('a quota error that closes the stream carries a typed quota_exhausted failure', async () => {
+      const message = "You've hit your usage limit. Try again later.";
+      mockRunStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield { type: 'error', message };
+        })(),
+      });
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        {
+          type: 'result',
+          sessionId: 'new-thread-id',
+          isError: true,
+          errorSubtype: 'codex_stream_incomplete',
+          errors: [message],
+          failure: { class: 'quota_exhausted', evidence: message },
+        },
+      ]);
+    });
+
+    test('a thrown quota error is reported once as a typed failure, not retried', async () => {
+      mockRunStreamed.mockRejectedValue(
+        new Error('429 insufficient_quota: You exceeded your current quota')
+      );
+
+      const chunks = [];
+      for await (const chunk of client.sendQuery('test', '/workspace')) {
+        chunks.push(chunk);
+      }
+
+      expect(mockRunStreamed).toHaveBeenCalledTimes(1);
+      expect(chunks).toEqual([
+        {
+          type: 'result',
+          isError: true,
+          errorSubtype: 'codex_quota_exhausted',
+          errors: ['429 insufficient_quota: You exceeded your current quota'],
+          failure: {
+            class: 'quota_exhausted',
+            evidence: '429 insufficient_quota: You exceeded your current quota',
+          },
+        },
+      ]);
+    });
+
     test('turn.failed without error message yields fail-stop with Unknown error', async () => {
       mockRunStreamed.mockResolvedValue({
         events: (async function* () {
@@ -2727,6 +2806,24 @@ describe('sendQuery decomposition behaviors', () => {
       process.removeListener('uncaughtException', handler);
     }
   }, 5_000);
+});
+
+describe('isCodexQuotaExhaustion', () => {
+  test('recognizes Codex quota and credit exhaustion wording', () => {
+    expect(isCodexQuotaExhaustion('Your workspace is out of credits')).toBe(true);
+    expect(isCodexQuotaExhaustion("You've hit your usage limit. Upgrade to Pro")).toBe(true);
+    expect(isCodexQuotaExhaustion('Quota exceeded. Check your plan and billing details.')).toBe(
+      true
+    );
+    expect(isCodexQuotaExhaustion('error code: insufficient_quota')).toBe(true);
+  });
+
+  test('leaves rate limits, auth and other failures untyped', () => {
+    expect(isCodexQuotaExhaustion('Rate limit exceeded')).toBe(false);
+    expect(isCodexQuotaExhaustion('429 Too Many Requests')).toBe(false);
+    expect(isCodexQuotaExhaustion('authentication failed')).toBe(false);
+    expect(isCodexQuotaExhaustion('Network failure')).toBe(false);
+  });
 });
 
 describe('classifyCodexError (#2509 R7)', () => {

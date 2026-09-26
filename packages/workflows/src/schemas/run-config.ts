@@ -4,12 +4,36 @@ import { runAliasesConfigSchema, runTiersConfigSchema } from './model-binding';
 
 const providerDefaultsSchema = z.record(z.string(), z.unknown());
 
+const quotaFallbackTierModelsSchema = z
+  .object({
+    small: z.string().trim().min(1),
+    medium: z.string().trim().min(1),
+    large: z.string().trim().min(1),
+  })
+  .strict();
+
+const codexQuotaFallbackSchema = z
+  .object({
+    provider: z.literal('opencode'),
+    tiers: quotaFallbackTierModelsSchema,
+  })
+  .strict();
+
+export const quotaFallbackConfigSchema = z
+  .object({
+    codex: codexQuotaFallbackSchema.optional(),
+  })
+  .strict();
+
+export type QuotaFallbackConfig = z.infer<typeof quotaFallbackConfigSchema>;
+
 export const workflowRunContinuationConfigSchema = z
   .object({
     autoResumeOnQuotaReset: z.boolean().optional(),
     quotaFallbackDelayMs: z.number().finite().positive().max(MAX_DURABLE_WAIT_MS).optional(),
     quotaMaxAttempts: z.number().int().positive().optional(),
     quotaDeadlineMs: z.number().finite().positive().max(MAX_DURABLE_WAIT_MS).optional(),
+    quotaFallback: quotaFallbackConfigSchema.optional(),
   })
   .strict();
 

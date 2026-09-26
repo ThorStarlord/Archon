@@ -36368,3 +36368,304 @@ describe('executeDagWorkflow -- node checkout starts (#3375)', () => {
     expect(consumer?.data.error).toContain('$missing.execution.checkoutStart');
   });
 });
+
+describe('executeDagWorkflow -- Codex quota fallback to OpenCode', () => {
+  let root: string;
+  let repoDir: string;
+  let codexCalls: number;
+  let opencodeCalls: number;
+  let codexStream: () => AsyncGenerator<Record<string, unknown>>;
+  let opencodeStream: () => AsyncGenerator<Record<string, unknown>>;
+
+  const QUOTA = {
+    type: 'result',
+    isError: true,
+    errorSubtype: 'codex_turn_failed',
+    errors: ['Your workspace is out of credits'],
+    failure: { class: 'quota_exhausted', evidence: 'Your workspace is out of credits' },
+  };
+
+  const FALLBACK_CONFIG: WorkflowConfig = {
+    ...minimalConfig,
+    assistants: { claude: {}, codex: {}, opencode: {} },
+    workflows: {
+      autoResumeOnQuotaReset: false,
+      quotaMaxAttempts: 3,
+      quotaDeadlineMs: 60_000,
+      quotaFallback: {
+        codex: {
+          provider: 'opencode',
+          tiers: {
+            small: 'openai/fallback-small',
+            medium: 'openai/fallback-medium',
+            large: 'openai/fallback-large',
+          },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    root = join(tmpdir(), `dag-qfb-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    repoDir = join(root, 'repo');
+    await mkdir(repoDir, { recursive: true });
+    await git.execFileAsync('git', ['init', '-q'], { cwd: repoDir });
+    await git.execFileAsync('git', ['config', 'user.email', 't@t'], { cwd: repoDir });
+    await git.execFileAsync('git', ['config', 'user.name', 't'], { cwd: repoDir });
+    await writeFile(join(repoDir, 'a.txt'), 'a\n');
+    await git.execFileAsync('git', ['add', '-A'], { cwd: repoDir });
+    await git.execFileAsync('git', ['commit', '-qm', 'init'], { cwd: repoDir });
+
+    codexCalls = 0;
+    opencodeCalls = 0;
+    codexStream = async function* () {
+      yield QUOTA;
+    };
+    opencodeStream = async function* () {
+      yield { type: 'assistant', content: 'opencode did it' };
+      yield { type: 'result', sessionId: 'oc-sess' };
+    };
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+    mockGetAgentProviderDag.mockImplementation(provider =>
+      provider === 'opencode'
+        ? {
+            sendQuery: async function* () {
+              opencodeCalls++;
+              yield* opencodeStream();
+            } as unknown as ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery'],
+            getType: () => 'opencode',
+            getCapabilities: () => getProviderCapabilities('opencode'),
+          }
+        : {
+            sendQuery: async function* () {
+              codexCalls++;
+              yield* codexStream();
+            } as unknown as ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery'],
+            getType: () => 'codex',
+            getCapabilities: mockCodexCapabilities,
+          }
+    );
+  });
+
+  afterEach(async () => {
+    mockGetAgentProviderDag.mockImplementation(_provider => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+    await removeTempTree(root);
+  });
+
+  const aiProfile = (): ReturnType<typeof buildAiProfile> =>
+    buildAiProfile('claude', {
+      repoTiers: { medium: { provider: 'codex', model: 'gpt-5.5', effort: 'medium' } },
+    });
+
+  const tierNode = (overrides: Partial<AgentNode> = {}): DagNode => ({
+    id: 'work',
+    kind: 'agent',
+    source: { kind: 'inline', prompt: 'Do the work' },
+    model: 'medium',
+    retry: { max_attempts: 0 },
+    ...overrides,
+  });
+
+  const run = async (
+    nodes: DagNode[],
+    options: { config?: WorkflowConfig; store?: MockWorkflowStore } = {}
+  ): Promise<ReturnType<typeof createMockDeps>> => {
+    const deps = createMockDeps(options.store);
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        cwd: repoDir,
+        artifactsDir: join(root, 'artifacts'),
+        stateDir: join(root, 'state'),
+        logDir: join(root, 'logs'),
+        config: options.config ?? FALLBACK_CONFIG,
+        aiProfile: aiProfile(),
+        workflow: { name: 'quota-fallback', nodes },
+        workflowRun: makeWorkflowRun('quota-fallback-run'),
+      })
+    );
+    return deps;
+  };
+
+  const terminals = (
+    deps: ReturnType<typeof createMockDeps>,
+    stepName: string
+  ): NonNullable<ReturnType<typeof readNodeRecordEvent>>[] =>
+    (deps.store.persistWorkflowEvent as Mock<IWorkflowStore['persistWorkflowEvent']>).mock.calls
+      .map(([event]) => event)
+      .filter(
+        event =>
+          event.step_name === stepName &&
+          (event.event_type === 'node_completed' || event.event_type === 'node_failed')
+      )
+      .map(event => {
+        const record = readNodeRecordEvent({
+          ...event,
+          step_name: event.step_name ?? null,
+          data: event.data ?? {},
+        });
+        if (!record) throw new Error(`unreadable ${event.event_type} for ${stepName}`);
+        return record;
+      });
+
+  const events = (
+    deps: ReturnType<typeof createMockDeps>,
+    type: string
+  ): { data?: Record<string, unknown> }[] =>
+    (deps.store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls
+      .map(call => call[0] as { event_type: string; data?: Record<string, unknown> })
+      .filter(event => event.event_type === type);
+
+  it('replays a pre-tool Codex quota failure once on the configured OpenCode model', async () => {
+    const deps = await run([
+      tierNode(),
+      { id: 'next', kind: 'exec', runtime: 'sh', script: 'true', depends_on: ['work'] },
+    ]);
+
+    expect(codexCalls).toBe(1);
+    expect(opencodeCalls).toBe(1);
+    const opencodeCall = mockGetAgentProviderDag.mock.calls.find(([p]) => p === 'opencode');
+    expect(opencodeCall).toBeDefined();
+
+    const [failed, completed] = terminals(deps, 'work');
+    expect(failed?.eventType).toBe('node_failed');
+    expect(completed?.eventType).toBe('node_completed');
+    expect(failed?.metadata?.binding.provider).toBe('codex');
+    expect(completed?.metadata?.binding).toMatchObject({ provider: 'opencode', tier: 'medium' });
+    expect(completed?.metadata?.binding.model?.requested).toBe('openai/fallback-medium');
+    expect(completed?.metadata?.binding.effort).toBeUndefined();
+    expect(completed?.metadata?.invocation).toEqual(failed?.metadata?.invocation);
+    expect(completed?.metadata?.attempt.id).not.toBe(failed?.metadata?.attempt.id);
+
+    const [fallback] = events(deps, 'provider_fallback');
+    expect(fallback?.data).toMatchObject({
+      from_provider: 'codex',
+      to_provider: 'opencode',
+      to_model: 'openai/fallback-medium',
+      tier: 'medium',
+      failure_class: 'quota_exhausted',
+      failed_attempt_id: failed?.metadata?.attempt.id,
+    });
+    expect(terminals(deps, 'next')[0]?.eventType).toBe('node_completed');
+    expect(deps.store.failWorkflowRun as ReturnType<typeof mock>).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed Codex attempt's partial batch prose out of the conversation", async () => {
+    codexStream = async function* () {
+      yield { type: 'assistant', content: 'codex partial thought' };
+      yield QUOTA;
+    };
+    const platform = createMockPlatform();
+    platform.getStreamingMode.mockReturnValue('batch');
+    const deps = createMockDeps();
+    await executeDagWorkflow(
+      dagOptions({
+        deps,
+        platform,
+        cwd: repoDir,
+        artifactsDir: join(root, 'artifacts'),
+        stateDir: join(root, 'state'),
+        logDir: join(root, 'logs'),
+        config: FALLBACK_CONFIG,
+        aiProfile: aiProfile(),
+        workflow: { name: 'quota-fallback-batch', nodes: [tierNode()] },
+        workflowRun: makeWorkflowRun('quota-fallback-batch-run'),
+      })
+    );
+    expect(opencodeCalls).toBe(1);
+    const sent = platform.sendMessage.mock.calls.map(call => String(call[1]));
+    expect(sent.some(text => text.includes('codex partial thought'))).toBe(false);
+    expect(sent.filter(text => text.includes('opencode did it'))).toHaveLength(1);
+  });
+
+  it('never falls back when the policy is absent', async () => {
+    const deps = await run([tierNode()], { config: minimalConfig });
+    expect(codexCalls).toBe(1);
+    expect(opencodeCalls).toBe(0);
+    expect(events(deps, 'provider_fallback')).toHaveLength(0);
+    expect(events(deps, 'provider_fallback_refused')).toHaveLength(0);
+  });
+
+  it('refuses after the Codex attempt used a tool', async () => {
+    codexStream = async function* () {
+      yield { type: 'tool', toolName: 'shell', toolCallId: 't1', toolInput: {} };
+      yield QUOTA;
+    };
+    const deps = await run([tierNode()]);
+    expect(opencodeCalls).toBe(0);
+    expect(events(deps, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'side_effects_observed' },
+    });
+  });
+
+  it('refuses when the checkout changed during the failed attempt', async () => {
+    codexStream = async function* () {
+      await writeFile(join(repoDir, 'a.txt'), 'changed\n');
+      yield QUOTA;
+    };
+    const deps = await run([tierNode()]);
+    expect(opencodeCalls).toBe(0);
+    expect(events(deps, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'checkout_changed' },
+    });
+  });
+
+  it('refuses explicit session continuity and explicit effort', async () => {
+    const shared = await run([tierNode({ context: 'shared' })]);
+    expect(events(shared, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'session_continuity' },
+    });
+    const effort = await run([tierNode({ effort: 'high' })]);
+    expect(events(effort, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'explicit_effort' },
+    });
+    expect(opencodeCalls).toBe(0);
+  });
+
+  it('refuses a literal Codex model with no tier', async () => {
+    const deps = await run([tierNode({ model: 'gpt-5.5', provider: 'codex' })]);
+    expect(opencodeCalls).toBe(0);
+    expect(events(deps, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'tier_required' },
+    });
+  });
+
+  it('does not dispatch OpenCode once the run was cancelled', async () => {
+    const store = createMockStore();
+    // Cancelled between the Codex failure and the fallback dispatch.
+    store.getWorkflowRunStatus.mockImplementation(async () =>
+      store.persistWorkflowEvent.mock.calls.some(([event]) => event.event_type === 'node_failed')
+        ? 'cancelled'
+        : 'running'
+    );
+    const deps = await run([tierNode()], { store });
+    expect(codexCalls).toBe(1);
+    expect(opencodeCalls).toBe(0);
+    expect(events(deps, 'provider_fallback_refused')[0]?.data).toMatchObject({
+      reason: { kind: 'run_not_active' },
+    });
+  });
+
+  it('does not switch providers again when the OpenCode attempt also fails', async () => {
+    opencodeStream = async function* () {
+      yield {
+        type: 'result',
+        isError: true,
+        errorSubtype: 'error_during_execution',
+        errors: ['opencode quota'],
+        failure: { class: 'quota_exhausted', evidence: 'opencode quota' },
+      };
+    };
+    const deps = await run([tierNode()]);
+    expect(codexCalls).toBe(1);
+    expect(opencodeCalls).toBe(1);
+    const records = terminals(deps, 'work');
+    expect(records.map(record => record.eventType)).toEqual(['node_failed', 'node_failed']);
+    expect(records[1]?.metadata?.binding.provider).toBe('opencode');
+  });
+});

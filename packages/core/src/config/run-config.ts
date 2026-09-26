@@ -5,6 +5,7 @@ import {
   getRegistration,
   InvalidProviderRunConfigError,
   isRegisteredProvider,
+  parseProviderRunModel,
 } from '@archon/providers';
 import {
   normalizeStrictRunModelPreset,
@@ -114,6 +115,17 @@ function normalizePreset(path: string, preset: ModelAliasPreset): ModelAliasPres
   }
 }
 
+function normalizeFallbackModel(path: string, provider: string, model: string): string {
+  try {
+    return parseProviderRunModel(provider, model);
+  } catch (error) {
+    if (error instanceof InvalidProviderRunConfigError) {
+      throw new Error(`Invalid run config at '${path}': ${error.message}.`);
+    }
+    throw error;
+  }
+}
+
 /** Validate and normalize constraints owned by the live provider registry and lifecycle. */
 export function normalizeRunConfigSemantics(layer: WorkflowRunConfigLayer): WorkflowRunConfigLayer {
   if (layer.assistant !== undefined) {
@@ -146,11 +158,43 @@ export function normalizeRunConfigSemantics(layer: WorkflowRunConfigLayer): Work
       normalizePreset(`aliases.${alias}`, preset),
     ])
   );
+  const fallback = layer.workflows?.quotaFallback?.codex;
+  const workflows =
+    fallback === undefined
+      ? layer.workflows
+      : {
+          ...layer.workflows,
+          quotaFallback: {
+            ...layer.workflows?.quotaFallback,
+            codex: {
+              ...fallback,
+              tiers: {
+                small: normalizeFallbackModel(
+                  'workflows.quotaFallback.codex.tiers.small',
+                  fallback.provider,
+                  fallback.tiers.small
+                ),
+                medium: normalizeFallbackModel(
+                  'workflows.quotaFallback.codex.tiers.medium',
+                  fallback.provider,
+                  fallback.tiers.medium
+                ),
+                large: normalizeFallbackModel(
+                  'workflows.quotaFallback.codex.tiers.large',
+                  fallback.provider,
+                  fallback.tiers.large
+                ),
+              },
+            },
+          },
+        };
+
   return {
     ...layer,
     ...(layer.assistants === undefined ? {} : { assistants }),
     ...(layer.tiers === undefined ? {} : { tiers }),
     ...(layer.aliases === undefined ? {} : { aliases }),
+    ...(layer.workflows === undefined ? {} : { workflows }),
   };
 }
 

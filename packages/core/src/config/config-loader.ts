@@ -47,6 +47,7 @@ import {
   InvalidProviderRunConfigError,
   registerBuiltinProviders,
   registerCommunityProviders,
+  parseProviderRunModel,
 } from '@archon/providers';
 import { buildAiProfile, TIER_NAMES } from '@archon/workflows/model-validation';
 import type { RawAliasEntry, TierName } from '@archon/workflows/model-validation';
@@ -304,6 +305,30 @@ function validateWorkflowContinuationConfig(parsed: unknown, configPath: string)
       .map(issue => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
       .join('; ');
     throw new InvalidConfigError('Invalid workflows config', configPath, issues);
+  }
+  const fallback = result.data.quotaFallback?.codex;
+  if (fallback !== undefined) {
+    try {
+      result.data.quotaFallback = {
+        ...result.data.quotaFallback,
+        codex: {
+          ...fallback,
+          tiers: {
+            small: parseProviderRunModel(fallback.provider, fallback.tiers.small),
+            medium: parseProviderRunModel(fallback.provider, fallback.tiers.medium),
+            large: parseProviderRunModel(fallback.provider, fallback.tiers.large),
+          },
+        },
+      };
+    } catch (error) {
+      const detail =
+        error instanceof InvalidProviderRunConfigError ? error.message : (error as Error).message;
+      throw new InvalidConfigError(
+        'Invalid workflows config',
+        configPath,
+        `quotaFallback.codex: ${detail}`
+      );
+    }
   }
   config.workflows = result.data;
 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `workflows.quotaFallback.codex` replays an agent node once on a configured OpenCode model when its Codex attempt fails with typed quota exhaustion. The replay is a new attempt of the same node invocation, and it runs only when the Codex attempt did nothing outside its own turn and the checkout is unchanged. Replays and refusals are recorded as `provider_fallback` and `provider_fallback_refused` workflow events.
+
+### Changed
+
+- The Codex provider reports quota and credit exhaustion (for example "Your workspace is out of credits" or "You've hit your usage limit") as a typed `quota_exhausted` failure. Such a failure is no longer retried inside the provider or by `on_error: all`, and it can trigger `workflows.quotaFallback.codex`.
+
 ## [0.11.1] - 2026-09-25
 
 A patch release: copied workflow packs load cleanly, and release notes now come from this changelog.

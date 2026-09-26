@@ -42,7 +42,8 @@
 # docsPath:   <path>                     overrides the project docs path
 # envVars:    { KEY: value }             extra env for this run's nodes
 # workflows:  { autoResumeOnQuotaReset, quotaFallbackDelayMs,
-#               quotaMaxAttempts, quotaDeadlineMs }
+#               quotaMaxAttempts, quotaDeadlineMs,
+#               quotaFallback: { codex: { provider: opencode, tiers } } }
 #
 # Alias names must start with `@`. Tier names are exactly small / medium / large.
 #
@@ -86,6 +87,22 @@
 # workflows:
 #   autoResumeOnQuotaReset: true
 #   quotaMaxAttempts: 3
+#
+# ---------------------------------------------------------------------------
+# Example: replay a tier node on OpenCode when Codex quota runs out
+# ---------------------------------------------------------------------------
+# Your normal tiers stay on Codex; the fallback models live separately and are
+# used only for a node that failed with Codex quota exhaustion before it did
+# anything outside its own turn. OpenCode ignores `effort`, so a tier's Codex
+# effort is not carried over.
+# workflows:
+#   quotaFallback:
+#     codex:
+#       provider: opencode
+#       tiers:
+#         small: openai/gpt-5.6-mini
+#         medium: openai/gpt-5.6
+#         large: anthropic/claude-sonnet-4-5
 
 # The file you copy needs at least one real key. This one is deliberately inert.
 tiers: {}
