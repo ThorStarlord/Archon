@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import type { ProviderCapabilities } from '@archon/providers/types';
-import type { QuotaFallbackInput, QuotaFallbackDecision } from './provider-fallback';
+import type { CheckoutObservation } from './schemas/checkout-observation';
+import {
+  checkoutProvenUnchanged,
+  resolveQuotaFallback,
+  type QuotaFallbackDecision,
+  type QuotaFallbackInput,
+} from './provider-fallback';
 
 const OPENCODE_CAPS = {
   sessionResume: true,
@@ -48,21 +54,15 @@ function input(overrides: Partial<QuotaFallbackInput> = {}): QuotaFallbackInput 
     requiresSessionContinuity: false,
     sideEffectsObserved: false,
     checkoutChanged: false,
+    runActive: true,
     requiredCapabilities: [],
     destinationCapabilities: OPENCODE_CAPS,
     ...overrides,
   };
 }
 
-async function resolve(value: QuotaFallbackInput): Promise<QuotaFallbackDecision> {
-  const module = (await import('./provider-fallback')) as Record<string, unknown>;
-  expect(typeof module.resolveQuotaFallback).toBe('function');
-  if (typeof module.resolveQuotaFallback !== 'function') {
-    throw new Error('resolveQuotaFallback is not implemented');
-  }
-  return (
-    module.resolveQuotaFallback as (arg: QuotaFallbackInput) => QuotaFallbackDecision
-  )(value);
+function resolve(value: QuotaFallbackInput): Promise<QuotaFallbackDecision> {
+  return Promise.resolve(resolveQuotaFallback(value));
 }
 
 describe('resolveQuotaFallback', () => {
@@ -125,10 +125,82 @@ describe('resolveQuotaFallback', () => {
     });
   });
 
+  it('refuses once the run is no longer active', async () => {
+    await expect(resolve(input({ runActive: false }))).resolves.toEqual({
+      eligible: false,
+      reason: { kind: 'run_not_active' },
+    });
+  });
+
   it('refuses a destination that cannot honor a required capability', async () => {
     await expect(resolve(input({ requiredCapabilities: ['mcp'] }))).resolves.toEqual({
       eligible: false,
       reason: { kind: 'unsupported_capability', capability: 'mcp' },
     });
+  });
+});
+
+const COMMIT = 'a'.repeat(40);
+const TREE = 'b'.repeat(40);
+
+function gitObservation(
+  worktree: Extract<CheckoutObservation, { kind: 'git' }>['worktree'],
+  overrides: Partial<Extract<CheckoutObservation, { kind: 'git' }>> = {}
+): CheckoutObservation {
+  return {
+    kind: 'git',
+    sampledAt: new Date().toISOString(),
+    commit: COMMIT,
+    tree: TREE,
+    worktree,
+    ...overrides,
+  };
+}
+
+function dirty(sha256: string, content: 'complete' | 'incomplete' = 'complete') {
+  return {
+    status: 'dirty' as const,
+    content,
+    staged: 0,
+    unstaged: 1,
+    untracked: 0,
+    manifest: {
+      pointer: { type: 'archon_artifact' as const, run_id: 'run', path: 'checkout/manifest.json' },
+      sha256,
+      entries: 1,
+    },
+  };
+}
+
+describe('checkoutProvenUnchanged', () => {
+  it('proves equality for the same clean commit and the same complete dirty manifest', () => {
+    const clean = gitObservation({ status: 'clean' });
+    expect(checkoutProvenUnchanged(clean, gitObservation({ status: 'clean' }))).toBe(true);
+    const same = dirty('c'.repeat(64));
+    expect(checkoutProvenUnchanged(gitObservation(same), gitObservation(same))).toBe(true);
+  });
+
+  it('refuses to prove equality when anything moved or cannot be identified', () => {
+    const clean = gitObservation({ status: 'clean' });
+    expect(checkoutProvenUnchanged(undefined, clean)).toBe(false);
+    expect(
+      checkoutProvenUnchanged(
+        clean,
+        gitObservation({ status: 'clean' }, { commit: 'd'.repeat(40) })
+      )
+    ).toBe(false);
+    expect(checkoutProvenUnchanged(clean, gitObservation(dirty('c'.repeat(64))))).toBe(false);
+    expect(
+      checkoutProvenUnchanged(
+        gitObservation(dirty('c'.repeat(64))),
+        gitObservation(dirty('e'.repeat(64)))
+      )
+    ).toBe(false);
+    const incomplete = dirty('c'.repeat(64), 'incomplete');
+    expect(checkoutProvenUnchanged(gitObservation(incomplete), gitObservation(incomplete))).toBe(
+      false
+    );
+    const notGit: CheckoutObservation = { kind: 'not_git', sampledAt: new Date().toISOString() };
+    expect(checkoutProvenUnchanged(notGit, notGit)).toBe(false);
   });
 });

@@ -144,6 +144,11 @@ export const WORKFLOW_EVENT_TYPES = [
   'quota_resume_triggered',
   'quota_resume_exhausted',
   'quota_resume_skipped',
+  // Codex -> OpenCode quota fallback: a failed Codex attempt was replayed once on the
+  // configured OpenCode model (`provider_fallback`), or the replay was refused with a
+  // typed reason (`provider_fallback_refused`). Data names the failed attempt.
+  'provider_fallback',
+  'provider_fallback_refused',
   'workflow_cancelled',
   'workflow_artifact',
   'integration_operation',

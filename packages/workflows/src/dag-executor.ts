@@ -70,6 +70,7 @@ import type {
 } from '@archon/providers/types';
 import { CONTAINER_ENV_DENYLIST, mergeTokenUsage } from '@archon/providers/types';
 import type { ProviderFailure } from '@archon/provider-contract';
+import { checkoutProvenUnchanged, resolveQuotaFallback } from './provider-fallback';
 import type { ContainerRunContext } from './container-context';
 import { WRITEBACK_GATE_NODE_ID } from './container-context';
 import {
@@ -1632,6 +1633,10 @@ async function resolveNodeProviderAndModel(
   tier?: TierName;
   effort?: EffortLevel;
   preset?: ModelAliasPreset;
+  /** The effort the author declared on the node or workflow, before any preset fills one in. */
+  declaredEffort?: EffortLevel;
+  /** Capabilities the node's authored fields need, whether or not this provider has them. */
+  declaredCapabilities: (keyof ProviderCapabilities)[];
 }> {
   // The chain itself lives in node-model-resolution.ts so `workflow dry-run` reports the
   // same answer this produces (#1764). Everything below is the part a dry run must NOT
@@ -1740,7 +1745,9 @@ async function resolveNodeProviderAndModel(
   ];
 
   const unsupported: string[] = [];
+  const declaredCapabilities: (keyof ProviderCapabilities)[] = [];
   for (const [field, cap, isSet] of capChecks) {
+    if (isSet) declaredCapabilities.push(cap);
     if (isSet && !caps[cap]) {
       unsupported.push(field);
     }
@@ -1875,6 +1882,8 @@ async function resolveNodeProviderAndModel(
     tier: resolution.tier,
     effort: resolvedEffort,
     preset: effectivePreset,
+    declaredEffort,
+    declaredCapabilities,
   };
 }
 
@@ -2136,6 +2145,12 @@ async function executeNodeInternal(
   };
   getLog().info({ nodeId: node.id, provider }, 'dag_node_started');
   await recordNodeState({ store: deps.store, logDir }, execution);
+  const attemptEvidence: AgentAttemptEvidence = {
+    attemptId: execution.attempt.id,
+    checkoutStart: execution.attempt.checkoutStart,
+    sideEffectsObserved: false,
+  };
+  ctx.lastAgentAttempt = attemptEvidence;
 
   let nodeTokens: TokenUsage | undefined;
   let nodeCostUsd: number | undefined;
@@ -2384,6 +2399,8 @@ async function executeNodeInternal(
           );
         }
       }
+
+      if (isSideEffectCapableChunk(msg)) attemptEvidence.sideEffectsObserved = true;
 
       if (msg.type === 'assistant' && msg.content) {
         nodeOutputText += msg.content; // ALWAYS capture for $node_id.output
@@ -3183,6 +3200,9 @@ async function executeNodeInternal(
       : err instanceof NodeFailure
         ? err.kind
         : providerFailureKind(err);
+    if (!cancelled && err instanceof NodeFailure) {
+      attemptEvidence.providerFailure = err.providerFailure;
+    }
     return failAgentNode(failureMessage, failureKind);
   }
   if (result.state === 'failed') {
@@ -3594,7 +3614,9 @@ class ExecOutputContractError extends Error {}
 class NodeFailure extends Error {
   constructor(
     readonly kind: NodeFailureKind,
-    message: string
+    message: string,
+    /** The provider's typed failure when one caused this, kept for the quota fallback decision. */
+    readonly providerFailure?: ProviderFailure
   ) {
     super(message);
   }
@@ -3607,8 +3629,191 @@ class NodeFailure extends Error {
 function providerReportedFailure(subject: string, failure: ProviderFailure): NodeFailure {
   return new NodeFailure(
     nodeFailureKindOf(failure),
-    `${subject} failed: provider reported ${failure.class}: ${failure.evidence}`
+    `${subject} failed: provider reported ${failure.class}: ${failure.evidence}`,
+    failure
   );
+}
+
+/** Replay-safety evidence one agent attempt leaves for the quota fallback decision. */
+interface AgentAttemptEvidence {
+  attemptId: string;
+  checkoutStart?: CheckoutObservation;
+  sideEffectsObserved: boolean;
+  providerFailure?: ProviderFailure;
+}
+
+/**
+ * Chunks showing the provider may have acted outside its own turn: a tool call or result,
+ * a sub-agent or background task, a hook, or a dispatched workflow. Replaying the attempt
+ * on another provider after any of these could repeat an effect, so the quota fallback
+ * refuses. Assistant, thinking and system text change nothing outside the turn.
+ */
+function isSideEffectCapableChunk(msg: MessageChunk): boolean {
+  switch (msg.type) {
+    case 'tool':
+    case 'tool_result':
+    case 'task_started':
+    case 'task_progress':
+    case 'task_notification':
+    case 'hook_started':
+    case 'hook_response':
+    case 'workflow_dispatch':
+      return true;
+    case 'background_tasks':
+      return msg.tasks.length > 0;
+    default:
+      return false;
+  }
+}
+
+/** What an agent node dispatch finally produced, and whose provider session it carries. */
+interface AgentDispatchOutcome {
+  output: NodeExecutionResult;
+  provider: string;
+}
+
+/**
+ * Replay a Codex attempt that ended in typed `quota_exhausted` once on the configured
+ * OpenCode model, under the same node invocation as a new attempt. Runs after the node's
+ * own retry loop, so same-provider retry is unchanged, and never recurses: whatever the
+ * OpenCode attempt returns is final. Every refusal after the policy applies is recorded as
+ * `provider_fallback_refused` with its typed reason; the failed Codex attempt then stands
+ * and existing quota handling (such as quota-reset continuation) takes over as before.
+ */
+async function replayQuotaFailureOnFallback(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  primary: AgentDispatchOutcome & {
+    tier: TierName | undefined;
+    declaredEffort: EffortLevel | undefined;
+    declaredCapabilities: readonly (keyof ProviderCapabilities)[];
+    requiresSessionContinuity: boolean;
+  },
+  runFallback: (provider: string, model: string) => Promise<NodeExecutionResult>
+): Promise<AgentDispatchOutcome> {
+  const unchanged = { output: primary.output, provider: primary.provider };
+  const evidence = ctx.lastAgentAttempt;
+  const policy = ctx.config.workflows?.quotaFallback;
+  // Cheap gate before sampling the run status and the checkout; resolveQuotaFallback
+  // re-checks each of these and owns the decision.
+  if (
+    primary.output.state !== 'failed' ||
+    primary.provider !== 'codex' ||
+    evidence?.providerFailure?.class !== 'quota_exhausted' ||
+    policy?.codex === undefined
+  ) {
+    return unchanged;
+  }
+
+  let runActive = false;
+  try {
+    runActive = (await ctx.deps.store.getWorkflowRunStatus(ctx.workflowRun.id)) === 'running';
+  } catch (err) {
+    getLog().warn(
+      { err: err as Error, workflowRunId: ctx.workflowRun.id, nodeId: node.id },
+      'dag.quota_fallback_status_check_failed'
+    );
+  }
+  let checkoutChanged = true;
+  try {
+    checkoutChanged = !checkoutProvenUnchanged(
+      evidence.checkoutStart,
+      await observeNodeCheckout(ctx)
+    );
+  } catch (err) {
+    getLog().warn(
+      { err: err as Error, workflowRunId: ctx.workflowRun.id, nodeId: node.id },
+      'dag.quota_fallback_checkout_observation_failed'
+    );
+  }
+
+  const sourceCapabilities = ctx.deps.getAgentProvider(primary.provider).getCapabilities();
+  const decision = resolveQuotaFallback({
+    sourceProvider: primary.provider,
+    failure: evidence.providerFailure,
+    tier: primary.tier,
+    policy,
+    explicitEffort: primary.declaredEffort !== undefined,
+    requiresSessionContinuity: primary.requiresSessionContinuity,
+    sideEffectsObserved: evidence.sideEffectsObserved,
+    checkoutChanged,
+    runActive,
+    // A requirement is what the failed attempt actually honored: a field Codex itself
+    // warned about and ignored cannot be lost by the replay. Effort is judged above.
+    requiredCapabilities: primary.declaredCapabilities.filter(
+      cap => cap !== 'effortControl' && sourceCapabilities[cap] === true
+    ),
+    destinationCapabilities: ctx.deps.getAgentProvider(policy.codex.provider).getCapabilities(),
+  });
+  const provenance = {
+    failed_attempt_id: evidence.attemptId,
+    from_provider: primary.provider,
+    failure_class: evidence.providerFailure.class,
+    ...(primary.tier !== undefined ? { tier: primary.tier } : {}),
+  };
+  const stepName = ctx.stepNamePrefix + node.id;
+
+  if (!decision.eligible) {
+    getLog().info(
+      { nodeId: node.id, workflowRunId: ctx.workflowRun.id, reason: decision.reason },
+      'dag.quota_fallback_refused'
+    );
+    await ctx.deps.store
+      .createWorkflowEvent({
+        workflow_run_id: ctx.workflowRun.id,
+        event_type: 'provider_fallback_refused',
+        step_name: stepName,
+        data: { ...provenance, reason: decision.reason },
+      })
+      .catch((err: Error) => {
+        getLog().error(
+          { err, workflowRunId: ctx.workflowRun.id, eventType: 'provider_fallback_refused' },
+          'workflow_event_persist_failed'
+        );
+      });
+    return unchanged;
+  }
+
+  getLog().warn(
+    {
+      nodeId: node.id,
+      workflowRunId: ctx.workflowRun.id,
+      toProvider: decision.provider,
+      toModel: decision.model,
+    },
+    'dag.quota_fallback_dispatched'
+  );
+  await ctx.deps.store
+    .createWorkflowEvent({
+      workflow_run_id: ctx.workflowRun.id,
+      event_type: 'provider_fallback',
+      step_name: stepName,
+      data: { ...provenance, to_provider: decision.provider, to_model: decision.model },
+    })
+    .catch((err: Error) => {
+      getLog().error(
+        { err, workflowRunId: ctx.workflowRun.id, eventType: 'provider_fallback' },
+        'workflow_event_persist_failed'
+      );
+    });
+  await safeSendMessage(
+    ctx.platform,
+    ctx.conversationId,
+    `⚠️ Node \`${node.id}\`: Codex quota is exhausted — retrying this node once on ${decision.provider} (\`${decision.model}\`) in a fresh session.`,
+    { workflowId: ctx.workflowRun.id, nodeName: node.id }
+  );
+
+  const output = await runFallback(decision.provider, decision.model);
+  // Both attempts were paid for; the node reports the sum, as the retry loop does.
+  const costs = [primary.output.costUsd, output.costUsd].filter(
+    (cost): cost is number => cost !== undefined
+  );
+  const tokens = [primary.output.tokens, output.tokens].filter(
+    (usage): usage is TokenUsage => usage !== undefined
+  );
+  output.costUsd = costs.length > 0 ? costs.reduce((sum, cost) => sum + cost, 0) : undefined;
+  output.tokens = tokens.length > 0 ? sumTokenUsage(tokens, { nodeId: node.id }) : undefined;
+  return { output, provider: decision.provider };
 }
 
 async function recordExecTimeoutSkip(
@@ -9566,6 +9771,8 @@ interface RunLayersContext extends RunInputs, RunDerived {
   nodeInvocation?: NodeInvocation;
   /** Last captured attempt for this isolated dispatch; unexpected failures retain its attribution. */
   currentExecution?: NodeExecutionRecord;
+  /** Replay-safety evidence from this dispatch's latest agent attempt (quota fallback). */
+  lastAgentAttempt?: AgentAttemptEvidence;
   unfinishedInvocations?: DagResumeSnapshot['unfinishedInvocations'];
   // --- per-subgraph mutable state (varies between top-level DAG and loop_group body) ---
   /** Pre-computed topological layers (caller builds once — body shape is static). runLayers walks ONLY these; there is deliberately no flat node list here. */
@@ -10376,6 +10583,8 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               options: nodeOptions,
               tier: resolvedTier,
               effort: resolvedEffort,
+              declaredEffort,
+              declaredCapabilities,
             } = await resolveNodeProviderAndModel(
               node,
               ctx.workflowProvider,
@@ -10552,40 +10761,99 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               node.mutates_checkout === false
                 ? await snapshotCheckout(ctx.cwd, checkoutExcludes)
                 : undefined;
-            const retriedOutput = await runNodeRetryLoop(
+            const runAgentAttempts = (
+              attemptProvider: string,
+              attemptOptions: SendQueryOptions | undefined,
+              attemptSessionId: string | undefined,
+              attemptModel: string | undefined,
+              attemptEffort: EffortLevel | undefined
+            ): Promise<NodeExecutionResult> =>
+              runNodeRetryLoop(
+                node,
+                ctx.platform,
+                ctx.conversationId,
+                ctx.workflowRun,
+                getEffectiveNodeRetryConfig(node),
+                async () => {
+                  // Fresh per attempt: an attempt after a transient failure observes
+                  // artifacts published in the interval, and never reuses the
+                  // listing handed to AI-configuration substitution above.
+                  const attemptTypedArtifactsFile = await writeNodeArtifactsListing(
+                    ctx.artifactsDir,
+                    ctx.workflowRun.id
+                  );
+                  return executeNodeInternal(
+                    ctx,
+                    node,
+                    attemptProvider,
+                    attemptOptions,
+                    // Always pass the prior session ID. executeNodeInternal requests a fork,
+                    // but legacy resume-only providers may continue in place; named resume
+                    // separately capability-gates and verifies an exact fork.
+                    attemptSessionId,
+                    attemptModel,
+                    resolvedTier,
+                    attemptEffort,
+                    ctx.stepNamePrefix,
+                    iteration,
+                    checkpointSessionForProvider(attemptProvider),
+                    attemptTypedArtifactsFile
+                  );
+                },
+                {
+                  state: 'failed',
+                  output: '',
+                  error: 'Node did not execute',
+                } as NodeExecutionResult
+              );
+            const dispatched = await replayQuotaFailureOnFallback(
+              ctx,
               node,
-              ctx.platform,
-              ctx.conversationId,
-              ctx.workflowRun,
-              getEffectiveNodeRetryConfig(node),
-              async () => {
-                // Fresh per attempt: an attempt after a transient failure observes
-                // artifacts published in the interval, and never reuses the
-                // listing handed to AI-configuration substitution above.
-                const attemptTypedArtifactsFile = await writeNodeArtifactsListing(
-                  ctx.artifactsDir,
-                  ctx.workflowRun.id
-                );
-                return executeNodeInternal(
-                  ctx,
-                  node,
+              {
+                output: await runAgentAttempts(
                   provider,
                   nodeOptions,
-                  // Always pass the prior session ID. executeNodeInternal requests a fork,
-                  // but legacy resume-only providers may continue in place; named resume
-                  // separately capability-gates and verifies an exact fork.
                   resumeSessionId,
                   resolvedNodeModel,
-                  resolvedTier,
-                  resolvedEffort,
-                  ctx.stepNamePrefix,
-                  iteration,
-                  checkpointSessionForProvider(provider),
-                  attemptTypedArtifactsFile
-                );
+                  resolvedEffort
+                ),
+                provider,
+                tier: resolvedTier,
+                declaredEffort,
+                declaredCapabilities,
+                // Only EXPLICIT continuity blocks the fallback. A sequential node's
+                // implicit cursor is already dropped at any provider boundary (#1992).
+                requiresSessionContinuity:
+                  hasNamedSessionResume ||
+                  node.context === 'shared' ||
+                  usesPersistedScope ||
+                  ctx.namedResumeSourceIds?.has(node.id) === true,
               },
-              { state: 'failed', output: '', error: 'Node did not execute' } as NodeExecutionResult
+              async (fallbackProvider, fallbackModel) => {
+                const { model, options } = await resolveNodeProviderAndModel(
+                  { ...node, provider: fallbackProvider, model: fallbackModel },
+                  ctx.workflowProvider,
+                  ctx.workflowModel,
+                  ctx.config,
+                  ctx.platform,
+                  ctx.conversationId,
+                  ctx.workflowRun.id,
+                  ctx.cwd,
+                  ctx.workflowLevelOptions,
+                  ctx.aiProfile,
+                  ctx.workflowPreset,
+                  resolveAiConfigText,
+                  ctx.warnedProviderConflicts,
+                  ctx.execContext
+                );
+                // A fresh session: a Codex thread id means nothing to OpenCode. Effort is
+                // not carried over — explicit effort already refused the fallback, and a
+                // tier preset's Codex effort is not an OpenCode setting.
+                return runAgentAttempts(fallbackProvider, options, undefined, model, undefined);
+              }
             );
+            const sessionProvider = dispatched.provider;
+            const retriedOutput = dispatched.output;
             const output = await assertCheckoutUntouched(
               node,
               ctx.cwd,
@@ -10692,7 +10960,7 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               }
             }
 
-            return { nodeId: node.id, output, sessionProvider: provider };
+            return { nodeId: node.id, output, sessionProvider };
           } catch (error) {
             // This dispatch boundary also owns provider/binding preparation failures.
             // Durable-write rejection must reach run recovery without becoming a node outcome.
