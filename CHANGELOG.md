@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `workflows.quotaFallback.codex` replays an agent node once on a configured OpenCode model when its Codex attempt fails with typed quota exhaustion. The replay is a new attempt of the same node invocation, and it runs only when the Codex attempt did nothing outside its own turn and the checkout is unchanged. Replays and refusals are recorded as `provider_fallback` and `provider_fallback_refused` workflow events.
+
 ## [0.11.1] - 2026-09-25
 
 A patch release: copied workflow packs load cleanly, and release notes now come from this changelog.

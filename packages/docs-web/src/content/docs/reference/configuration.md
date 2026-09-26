@@ -790,10 +790,42 @@ DISCORD_STREAMING_MODE=batch
 | `quotaFallbackDelayMs` | unset | Explicit delay to use only when the provider error has no machine-readable reset time, capped at 1000 years. When unset, Archon records that automatic continuation was skipped instead of guessing |
 | `quotaMaxAttempts` | `1` | Maximum number of scheduled continuation attempts for one run |
 | `quotaDeadlineMs` | `86400000` | Maximum window from the first quota failure in which a continuation may be scheduled, capped at 1000 years |
+| `quotaFallback` | unset | Replay a node that ran out of Codex quota once on OpenCode. See [Codex quota fallback to OpenCode](#codex-quota-fallback-to-opencode) |
 
 This policy is separate from per-node `retry:`. Quota exhaustion is terminal for the current attempt because retrying in the same provider window only repeats the failure. When enabled, Archon leaves the run `failed`, records the scheduled time in run metadata, and the server claims and resumes it when due. The claim is durable and bounded, so two server scans cannot launch the same attempt and an early resume failure does not create a rapid retry loop.
 
 Provider errors that include an unambiguous epoch or relative reset duration use it. Errors such as MiniMax plan exhaustion code `2056` often omit a reset time; those resume only when you configure `quotaFallbackDelayMs`. The server must be running at the due time, or it resumes the run on the first later scan.
+
+### Codex quota fallback to OpenCode
+
+`workflows.quotaFallback.codex` lets a node that ran out of Codex quota finish on OpenCode instead of failing. It is off unless you configure it, and it names one OpenCode model per tier:
+
+```yaml
+workflows:
+  quotaFallback:
+    codex:
+      provider: opencode # the only destination in this version
+      tiers:
+        small: openai/gpt-5.6-mini
+        medium: openai/gpt-5.6
+        large: anthropic/claude-sonnet-4-5
+```
+
+Each model is an OpenCode `<provider>/<model>` reference and is validated when the config loads. Your `tiers:` stay on Codex; these models are used only for a fallback.
+
+When a Codex attempt of an agent node ends with a typed `quota_exhausted` failure from the provider, after the node's own `retry:` loop, Archon replays that node once on the OpenCode model for the node's tier. The replay is a new attempt of the same node invocation in a fresh OpenCode session. It is not a workflow restart and it never chains: if the OpenCode attempt fails, including on its own quota, the node fails as it would have.
+
+The replay happens only when Archon can show it repeats nothing. It is refused when:
+
+- the node does not resolve through a tier (a literal model reference such as `model: gpt-5.5`);
+- the node or workflow sets `effort:` explicitly, because OpenCode has no per-request reasoning control. Effort that comes only from a Codex tier preset is dropped, and the attempt record shows no effort;
+- the node needs session continuity: `context: shared`, `context: { resume: ... }`, `persist_session`, or a later node resumes this node's session;
+- the Codex attempt already used a tool, started a sub-agent or background task, ran a hook, or dispatched a workflow;
+- the checkout cannot be proven unchanged since the attempt started (a Git checkout with the same commit and identical worktree state; a directory outside Git never qualifies);
+- the node declares a capability the Codex attempt honored and OpenCode lacks, such as `mcp` or `skills`;
+- the run is no longer running, for example because it was cancelled.
+
+A replay is recorded as a `provider_fallback` workflow event naming the failed attempt, the tier and the OpenCode model, and the chat gets a notice. A refusal is recorded as `provider_fallback_refused` with its reason. After a refusal the failed Codex attempt stands, and `autoResumeOnQuotaReset` handles it exactly as before.
 
 ## Concurrency Settings
 
