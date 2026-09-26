@@ -113,6 +113,7 @@
     ],
     [
       "src/defaults/",
+      "src/provider-fallback.test.ts",
       "src/run-config.test.ts",
       "src/model-validation.test.ts",
       "src/router.test.ts",
