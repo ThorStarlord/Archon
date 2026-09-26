@@ -62,12 +62,12 @@ workflows:
     codex:
       provider: opencode
       tiers:
-        small:  <opencode-model-ref>
-        medium: <opencode-model-ref>
-        large:  <opencode-model-ref>
+        small:  string
+        medium: string
+        large:  string
 ```
 
-OpenCode model refs use its existing `<provider>/<model>` syntax.
+Each tier value is a required string using OpenCode's existing `<provider>/<model>` model-ref syntax. The concrete model is operator configuration, not a design-time default; Archon validates it with OpenCode's existing parser before the run starts.
 
 The policy is optional and default-off. A source provider without an entry behaves exactly as today.
 
