@@ -75,7 +75,13 @@ describe('resolveQuotaFallback', () => {
   });
 
   it('refuses every provider failure class except quota exhaustion', async () => {
-    for (const failureClass of ['auth', 'budget_exceeded', 'rate_limited', 'transient', 'unknown'] as const) {
+    for (const failureClass of [
+      'auth',
+      'budget_exceeded',
+      'rate_limited',
+      'transient',
+      'unknown',
+    ] as const) {
       await expect(
         resolve(input({ failure: { class: failureClass, evidence: failureClass } }))
       ).resolves.toEqual({
