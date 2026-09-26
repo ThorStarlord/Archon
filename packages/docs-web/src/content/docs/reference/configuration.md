@@ -813,7 +813,7 @@ workflows:
 
 Each model is an OpenCode `<provider>/<model>` reference and is validated when the config loads. Your `tiers:` stay on Codex; these models are used only for a fallback.
 
-When a Codex attempt of an agent node ends with a typed `quota_exhausted` failure from the provider, after the node's own `retry:` loop, Archon replays that node once on the OpenCode model for the node's tier. The replay is a new attempt of the same node invocation in a fresh OpenCode session. It is not a workflow restart and it never chains: if the OpenCode attempt fails, including on its own quota, the node fails as it would have.
+When a Codex attempt of an agent node ends with a typed `quota_exhausted` failure (the Codex provider reports one when Codex says its quota, usage limit or credits are exhausted), after the node's own `retry:` loop, Archon replays that node once on the OpenCode model for the node's tier. The replay is a new attempt of the same node invocation in a fresh OpenCode session. It is not a workflow restart and it never chains: if the OpenCode attempt fails, including on its own quota, the node fails as it would have.
 
 The replay happens only when Archon can show it repeats nothing. It is refused when:
 

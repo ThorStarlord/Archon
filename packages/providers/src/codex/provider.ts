@@ -322,6 +322,28 @@ const RATE_LIMIT_PATTERNS = ['rate limit', 'too many requests', 'overloaded'];
 // retry (#2509 R7).
 const AUTH_PATTERNS = ['credit balance', 'unauthorized', 'authentication', 'invalid token'];
 const SUBPROCESS_CRASH_PATTERNS = ['exited with code', 'killed', 'signal', 'codex exec'];
+// Codex quota and credit exhaustion. The Codex SDK reports a failed turn as
+// `ThreadError { message }` with no code, so the provider boundary is the one place
+// its wording can become the typed `quota_exhausted` class; the engine then decides
+// from the class alone (quota-fallback spec §5). `insufficient_quota` is the OpenAI
+// API's machine code; the rest are Codex's own messages. A reworded message degrades
+// to today's untyped failure, never to a wrong class.
+const QUOTA_PATTERNS = ['insufficient_quota', 'out of credits', 'usage limit', 'quota exceeded'];
+
+/** Exported for direct unit testing. True when Codex says its quota or credits ran out. */
+export function isCodexQuotaExhaustion(errorMessage: string): boolean {
+  const m = errorMessage.toLowerCase();
+  return QUOTA_PATTERNS.some(p => m.includes(p));
+}
+
+/** The typed failure a quota message carries on its result chunk; empty for anything else. */
+function quotaFailureFields(
+  errorMessage: string
+): { failure: { class: 'quota_exhausted'; evidence: string } } | Record<string, never> {
+  return isCodexQuotaExhaustion(errorMessage)
+    ? { failure: { class: 'quota_exhausted', evidence: errorMessage } }
+    : {};
+}
 
 /** Exported for direct unit testing — see provider.test.ts (#2509 R7). */
 export function classifyCodexError(
@@ -574,6 +596,7 @@ async function* streamCodexEvents(
         isError: true,
         errorSubtype: 'codex_turn_failed',
         errors: [errorMessage],
+        ...quotaFailureFields(errorMessage),
       };
       return;
     }
@@ -832,6 +855,7 @@ async function* streamCodexEvents(
     isError: true,
     errorSubtype: 'codex_stream_incomplete',
     errors: [message],
+    ...quotaFailureFields(message),
   };
 }
 
@@ -1136,6 +1160,20 @@ export class CodexProvider implements IAgentProvider {
 
           if (requestOptions?.abortSignal?.aborted) {
             throw new Error('Query aborted');
+          }
+
+          // Exhausted quota does not recover within a subprocess retry window, so it is
+          // reported once as a typed failure instead of being retried or thrown as prose.
+          if (isCodexQuotaExhaustion(err.message)) {
+            getLog().error({ err, attempt }, 'query_quota_exhausted');
+            yield {
+              type: 'result',
+              isError: true,
+              errorSubtype: 'codex_quota_exhausted',
+              errors: [err.message],
+              ...quotaFailureFields(err.message),
+            };
+            return;
           }
 
           const { enrichedError, errorClass, shouldRetry } = classifyAndEnrichCodexError(
