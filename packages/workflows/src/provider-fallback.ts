@@ -30,3 +30,60 @@ export interface QuotaFallbackInput {
 export type QuotaFallbackDecision =
   | { eligible: true; provider: 'opencode'; model: string }
   | { eligible: false; reason: QuotaFallbackRefusal };
+
+
+export function resolveQuotaFallback(input: QuotaFallbackInput): QuotaFallbackDecision {
+  if (input.sourceProvider !== 'codex') {
+    return {
+      eligible: false,
+      reason: { kind: 'source_provider', provider: input.sourceProvider },
+    };
+  }
+
+  if (input.failure.class !== 'quota_exhausted') {
+    return {
+      eligible: false,
+      reason: { kind: 'failure_class', failureClass: input.failure.class },
+    };
+  }
+
+  const fallback = input.policy?.codex;
+  if (fallback === undefined) {
+    return { eligible: false, reason: { kind: 'not_configured' } };
+  }
+
+  if (input.tier === undefined) {
+    return { eligible: false, reason: { kind: 'tier_required' } };
+  }
+
+  if (input.requiresSessionContinuity) {
+    return { eligible: false, reason: { kind: 'session_continuity' } };
+  }
+
+  if (input.explicitEffort) {
+    return { eligible: false, reason: { kind: 'explicit_effort' } };
+  }
+
+  if (input.sideEffectsObserved) {
+    return { eligible: false, reason: { kind: 'side_effects_observed' } };
+  }
+
+  if (input.checkoutChanged) {
+    return { eligible: false, reason: { kind: 'checkout_changed' } };
+  }
+
+  for (const capability of input.requiredCapabilities) {
+    if (!input.destinationCapabilities[capability]) {
+      return {
+        eligible: false,
+        reason: { kind: 'unsupported_capability', capability },
+      };
+    }
+  }
+
+  return {
+    eligible: true,
+    provider: fallback.provider,
+    model: fallback.tiers[input.tier],
+  };
+}
