@@ -23,6 +23,7 @@ import type {
   WorkflowRunConfigLayer,
   WorkflowRunConfigMetadata,
   WorkflowRunConfigSource,
+  QuotaFallbackConfig,
 } from './schemas/run-config';
 
 export const CODEX_AUTH_JSON_RELATIVE_PATH = 'codex-home/auth.json';
@@ -118,6 +119,7 @@ export interface WorkflowConfig {
     quotaFallbackDelayMs?: number;
     quotaMaxAttempts: number;
     quotaDeadlineMs: number;
+    quotaFallback?: QuotaFallbackConfig;
   };
   defaults?: {
     loadDefaultWorkflows?: boolean;
