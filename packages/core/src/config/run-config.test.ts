@@ -37,7 +37,19 @@ describe('workflow run config', () => {
         assistants: { pi: { model: 'minimax/MiniMax-M3', enableExtensions: false } },
         tiers: { large: { provider: 'codex', model: 'gpt-5.6-sol' } },
         aliases: { '@planner': { provider: 'claude', model: 'opus' } },
-        workflows: { quotaMaxAttempts: 3 },
+        workflows: {
+          quotaMaxAttempts: 3,
+          quotaFallback: {
+            codex: {
+              provider: 'opencode',
+              tiers: {
+                small: ' openai / gpt-5.6-mini ',
+                medium: ' openai / gpt-5.6 ',
+                large: ' anthropic / claude-sonnet-4-5 ',
+              },
+            },
+          },
+        },
         docs: { path: 'handbook' },
         env: { BENCH_TOKEN: 'top-secret' },
       },
@@ -51,7 +63,19 @@ describe('workflow run config', () => {
         assistants: { pi: { model: 'minimax/MiniMax-M3', enableExtensions: false } },
         tiers: { large: { provider: 'codex', model: 'gpt-5.6-sol' } },
         aliases: { '@planner': { provider: 'claude', model: 'opus' } },
-        workflows: { quotaMaxAttempts: 3 },
+        workflows: {
+          quotaMaxAttempts: 3,
+          quotaFallback: {
+            codex: {
+              provider: 'opencode',
+              tiers: {
+                small: 'openai/gpt-5.6-mini',
+                medium: 'openai/gpt-5.6',
+                large: 'anthropic/claude-sonnet-4-5',
+              },
+            },
+          },
+        },
         docsPath: 'handbook',
         envVars: { BENCH_TOKEN: 'top-secret' },
       },
@@ -157,6 +181,25 @@ describe('workflow run config', () => {
         { kind: 'http', label: 'inline' }
       )
     ).toThrow("Invalid run config at 'aliases.@unsupported.effort'");
+    expect(() =>
+      parseWorkflowRunConfig(
+        {
+          workflows: {
+            quotaFallback: {
+              codex: {
+                provider: 'opencode',
+                tiers: {
+                  small: 'openai/gpt-5.6-mini',
+                  medium: 'not-an-opencode-model-ref',
+                  large: 'anthropic/claude-sonnet-4-5',
+                },
+              },
+            },
+          },
+        },
+        { kind: 'http', label: 'inline' }
+      )
+    ).toThrow("Invalid run config at 'workflows.quotaFallback.codex.tiers.medium'");
     expect(() =>
       parseWorkflowRunConfig(
         {
