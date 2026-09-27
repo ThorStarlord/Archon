@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenCode structured output is read from the current server shape.** The OpenCode provider read a node's captured `json_schema` payload only from the message info field `structured_output`, but current OpenCode servers report it as `structured` — and, when the model satisfies the schema through the injected `StructuredOutput` tool, on that completed tool part. Nodes that declare `output_format` therefore failed with "no schema-valid structured output" even though the model had produced a valid payload. The provider now reads `structured`, then the legacy `structured_output`, then the completed `StructuredOutput` tool part's input.
+
 ## [0.10.1] - 2026-08-30
 
 **This patch release contains a breaking change.** Built-in model tiers now ship for `claude` and `codex` only. If your install runs `pi`, `copilot`, or `opencode` and you have never configured `tiers:`, bundled workflows will refuse to load until you set them — read the Breaking section before upgrading. Everyone else gets a smaller review bill and four fixes.

@@ -92,6 +92,16 @@ export async function promptSession(
   });
 }
 
+/**
+ * Read the structured payload OpenCode captured for a `json_schema` prompt.
+ *
+ * OpenCode reports the captured payload as a `structured` field on the assistant
+ * message info (current servers) or, on older servers, as `structured_output`; when
+ * the model satisfies the schema through the injected tool, the payload also appears
+ * as a completed `StructuredOutput` tool part. Read whichever is present. A schema the
+ * model never filled in returns undefined, so the caller keeps its fail-closed
+ * "no schema-valid structured output" behaviour.
+ */
 async function readStructuredOutput(
   client: OpencodeClientLike,
   cwd: string,
@@ -105,14 +115,30 @@ async function readStructuredOutput(
       path: { id: sessionId, messageID: messageId },
       query: { directory: cwd },
     });
-    const info = response.data?.info;
-    if (isRecord(info) && 'structured_output' in info) {
-      return info.structured_output;
+    const data = response.data as { info?: unknown; parts?: unknown } | undefined;
+    const info = data?.info;
+    if (isRecord(info)) {
+      if (info.structured !== undefined) return info.structured;
+      if (info.structured_output !== undefined) return info.structured_output;
     }
+    return structuredOutputFromParts(data?.parts);
   } catch (error) {
     getLog().warn({ err: error, sessionId, messageId }, 'opencode.structured_output_lookup_failed');
   }
 
+  return undefined;
+}
+
+/** The `StructuredOutput` tool part's captured input, when the model produced it there. */
+function structuredOutputFromParts(parts: unknown): unknown {
+  if (!Array.isArray(parts)) return undefined;
+  for (const part of parts) {
+    if (!isRecord(part) || part.type !== 'tool' || part.tool !== 'StructuredOutput') continue;
+    const state = isRecord(part.state) ? part.state : undefined;
+    if (state?.status === 'completed' && 'input' in state) {
+      return state.input;
+    }
+  }
   return undefined;
 }
 
