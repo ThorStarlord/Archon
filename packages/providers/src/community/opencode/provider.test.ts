@@ -620,6 +620,108 @@ describe('OpencodeProvider', () => {
     ]);
   });
 
+  test('structured output reads the current `structured` info field', async () => {
+    const runtime = makeRuntime({
+      sessionMessage: mock(async () => ({
+        data: {
+          info: {
+            structured: { answer: 'ok', confidence: 0.9 },
+          },
+        },
+      })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: { sessionID: 'session-1' },
+      },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: {
+          type: 'json_schema',
+          schema: { type: 'object', properties: { answer: { type: 'string' } } },
+        },
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks).toEqual([
+      {
+        type: 'result',
+        sessionId: 'session-1',
+        structuredOutput: { answer: 'ok', confidence: 0.9 },
+      },
+    ]);
+  });
+
+  test('structured output falls back to the completed StructuredOutput tool part', async () => {
+    const runtime = makeRuntime({
+      sessionMessage: mock(async () => ({
+        data: {
+          info: { role: 'assistant' },
+          parts: [
+            { type: 'step-start' },
+            {
+              type: 'tool',
+              tool: 'StructuredOutput',
+              state: { status: 'completed', input: { answer: 'ok', confidence: 0.9 } },
+            },
+          ],
+        },
+      })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: { sessionID: 'session-1' },
+      },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: {
+          type: 'json_schema',
+          schema: { type: 'object', properties: { answer: { type: 'string' } } },
+        },
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks).toEqual([
+      {
+        type: 'result',
+        sessionId: 'session-1',
+        structuredOutput: { answer: 'ok', confidence: 0.9 },
+      },
+    ]);
+  });
+
   test('structured output failure logs debug and still yields terminal result', async () => {
     const runtime = makeRuntime({
       sessionMessage: mock(async () => {
