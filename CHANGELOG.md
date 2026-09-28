@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **OpenCode SDK bumped to `@opencode-ai/sdk` 1.18.32 to match current OpenCode servers.** The pin bundled 1.17.3. With a current OpenCode CLI the provider's session stream stalled mid-work: a node produced tool output, then emitted no further events until the node's idle timeout failed it. Reproduced against both the 1.17.3 and 1.18.32 CLIs and with two models (`deepseek-v4.1-flash`, `grok-4.6`), so the stall tracks the bundled client, not the CLI/server or the model. No provider code change was needed; the provider tests and type-check pass unchanged.
+
 ### Fixed
 
 - **OpenCode structured output is read from the current server shape.** The OpenCode provider read a node's captured `json_schema` payload only from the message info field `structured_output`, but current OpenCode servers report it as `structured` — and, when the model satisfies the schema through the injected `StructuredOutput` tool, on that completed tool part. Nodes that declare `output_format` therefore failed with "no schema-valid structured output" even though the model had produced a valid payload. The provider now reads `structured`, then the legacy `structured_output`, then the completed `StructuredOutput` tool part's input.
