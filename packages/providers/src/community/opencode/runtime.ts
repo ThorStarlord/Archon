@@ -2,7 +2,13 @@ import { createLogger } from '@archon/paths';
 import { execSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
-const OPENCODE_START_TIMEOUT_MS = 5000;
+/**
+ * How long the embedded OpenCode server gets to print its listening line. Real
+ * machines regularly need 8-10 s (multi-GB local store, scanners, cold start), so the
+ * old 5 s budget failed healthy servers deterministically — triage failed 3/3 before a
+ * single model call. Retries do not help: every attempt hits the same budget.
+ */
+const OPENCODE_START_TIMEOUT_MS = 30000;
 const OPENCODE_START_MAX_RETRIES = 3;
 
 function generateRandomPassword(): string {

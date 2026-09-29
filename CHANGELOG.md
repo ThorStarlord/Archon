@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode embedded-server start budget raised to 30 s.** Real machines regularly need 8–10 s
+  for the spawned server to print its listening line (multi-GB local store, scanners, cold
+  start), so the old 5 s budget failed healthy servers deterministically — observed as
+  `triage__triage` failing 3/3 attempts on `Timeout waiting for server to start after 5000ms`
+  before any model call. Retries cannot help because every attempt hits the same budget.
+
 - **OpenCode structured output is read from the current server shape.** The OpenCode provider read a node's captured `json_schema` payload only from the message info field `structured_output`, but current OpenCode servers report it as `structured` — and, when the model satisfies the schema through the injected `StructuredOutput` tool, on that completed tool part. Nodes that declare `output_format` therefore failed with "no schema-valid structured output" even though the model had produced a valid payload. The provider now reads `structured`, then the legacy `structured_output`, then the completed `StructuredOutput` tool part's input.
 
 ## [0.10.1] - 2026-08-30
