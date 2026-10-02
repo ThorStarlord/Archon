@@ -7,6 +7,7 @@ import { errorMessage } from './errors';
 import type { OpencodeClientLike } from './runtime';
 import {
   abortableStream,
+  checkPermissionEvent,
   createSessionPromptBody,
   promptSession,
   resolveSessionId,
@@ -225,6 +226,21 @@ export async function* streamMultiAgentOpencodeSession(
         if (typeof info.id === 'string') {
           state.lastAssistantMessageId = info.id;
         }
+        continue;
+      }
+
+      if (event.type === 'permission.updated') {
+        const requestSessionId =
+          typeof properties.sessionID === 'string' ? properties.sessionID : undefined;
+        const target = requestSessionId ? sessionToAgent.get(requestSessionId) : undefined;
+        if (!target) continue;
+        const captured = target.chunks.some(
+          chunk =>
+            chunk.type === 'tool_result' &&
+            chunk.toolName === 'StructuredOutput' &&
+            chunk.toolOutcome === 'success'
+        );
+        checkPermissionEvent(event.type, properties, target.sessionId, captured);
         continue;
       }
 
