@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode steps fail fast on unanswered permission requests instead of hanging.** The
+  OpenCode provider treated a turn as finished only on `session.idle` and ignored OpenCode
+  `permission.updated` events, so a tool needing approval (e.g. `external_directory`, which
+  defaults to `ask`) stalled the session silently until the node idle timeout. The provider now
+  throws a typed `OpencodePermissionRequiredError` naming the kind and patterns
+  (`provider_failure:permission`) as soon as such a request arrives — unless the required
+  structured output was already captured, in which case the request is ignored rather than
+  turning a working run into a false failure. Archon still approves nothing automatically.
+
+### Fixed
+
 - **OpenCode embedded-server start budget raised to 30 s.** Real machines regularly need 8–10 s
   for the spawned server to print its listening line (multi-GB local store, scanners, cold
   start), so the old 5 s budget failed healthy servers deterministically — observed as

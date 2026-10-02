@@ -766,6 +766,175 @@ describe('OpencodeProvider', () => {
     expect(mockLogger.warn).toHaveBeenCalledTimes(1);
   });
 
+  test('unanswered permission request fails the step immediately with a typed error', async () => {
+    const runtime = makeRuntime({});
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'permission.updated',
+        properties: {
+          id: 'per-1',
+          type: 'external_directory',
+          pattern: ['C:\\work\\artifacts\\*'],
+          sessionID: 'session-1',
+          messageID: 'message-1',
+          title: 'Write outside the working directory',
+          metadata: {},
+          time: { created: 1 },
+        },
+      },
+    ];
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+      })
+    );
+
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('provider_failure:permission');
+    expect(error?.message).toContain('external_directory');
+    expect(error?.message).toContain('C:\\work\\artifacts\\*');
+    expect(error?.message).toContain('OPENCODE_CONFIG');
+    // Fails fast: the query is not retried, so the model is prompted exactly once.
+    expect(runtime.client.session.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('permission request for another session is ignored', async () => {
+    const runtime = makeRuntime({
+      sessionMessage: mock(async () => ({ data: { info: {} } })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'permission.updated',
+        properties: {
+          id: 'per-9',
+          type: 'external_directory',
+          pattern: ['C:\\other\\*'],
+          sessionID: 'someone-elses-session',
+          messageID: 'message-9',
+          title: 'Write outside the working directory',
+          metadata: {},
+          time: { created: 1 },
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: { sessionID: 'session-1' },
+      },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks).toEqual([
+      {
+        type: 'result',
+        sessionId: 'session-1',
+      },
+    ]);
+  });
+
+  test('permission request after the structured output exists does not fail the step', async () => {
+    const runtime = makeRuntime({
+      sessionMessage: mock(async () => ({
+        data: {
+          info: {
+            structured: { answer: 'ok' },
+          },
+        },
+      })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            sessionID: 'session-1',
+            type: 'tool',
+            tool: 'StructuredOutput',
+            callID: 'call-1',
+            state: { status: 'completed', input: { answer: 'ok' } },
+          },
+        },
+      },
+      {
+        type: 'permission.updated',
+        properties: {
+          id: 'per-2',
+          type: 'edit',
+          pattern: ['C:\\work\\extra.md'],
+          sessionID: 'session-1',
+          messageID: 'message-1',
+          title: 'Edit a file',
+          metadata: {},
+          time: { created: 2 },
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: { sessionID: 'session-1' },
+      },
+    ];
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: {
+          type: 'json_schema',
+          schema: { type: 'object', properties: { answer: { type: 'string' } } },
+        },
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(chunks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'result',
+          sessionId: 'session-1',
+          structuredOutput: { answer: 'ok' },
+        }),
+      ])
+    );
+  });
+
   test('rate limit errors are classified as retryable and retried', async () => {
     const retryRuntime = makeRuntime({
       promptAsync: mock(async () => {

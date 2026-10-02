@@ -142,6 +142,67 @@ function structuredOutputFromParts(parts: unknown): unknown {
   return undefined;
 }
 
+/**
+ * An OpenCode `permission.updated` event Archon refuses to answer. Archon runs unattended and
+ * approves nothing, so a pending permission would otherwise stall the session silently until the
+ * node idle timeout. The `provider_failure:permission` marker keeps the reason string stable for
+ * downstream mapping without adding a retry class — the engine already refuses to retry
+ * failures it cannot classify.
+ */
+export class OpencodePermissionRequiredError extends Error {
+  readonly permissionId: string | undefined;
+  readonly permissionKind: string;
+  readonly permissionPatterns: string[];
+
+  constructor(options: { permissionId?: string; kind: string; patterns: string[] }) {
+    super(
+      `OpenCode permission required (provider_failure:permission): kind '${options.kind}' ` +
+        `for pattern(s) [${options.patterns.map(pattern => `"${pattern}"`).join(', ')}]` +
+        (options.permissionId ? ` (permission ${options.permissionId})` : '') +
+        '. Archon never approves permissions on your behalf — pre-allow it via ' +
+        `OPENCODE_CONFIG (opencode.json: permission.${options.kind}).`
+    );
+    this.name = 'OpencodePermissionRequiredError';
+    this.permissionId = options.permissionId;
+    this.permissionKind = options.kind;
+    this.permissionPatterns = options.patterns;
+  }
+}
+
+/**
+ * Fail fast on an OpenCode permission request aimed at `sessionId`.
+ *
+ * Requests for other sessions on the shared subscription are ignored. A request that arrives
+ * after the required structured output was already captured (a completed `StructuredOutput`
+ * tool call) is also ignored: the payload is in hand and `readStructuredOutput` will still
+ * find it, so failing would turn a working run into a false failure.
+ */
+export function checkPermissionEvent(
+  eventType: string | undefined,
+  properties: Record<string, unknown>,
+  sessionId: string | undefined,
+  structuredOutputCaptured: boolean
+): void {
+  if (eventType !== 'permission.updated') return;
+  const requestSessionId =
+    typeof properties.sessionID === 'string' ? properties.sessionID : undefined;
+  if (requestSessionId !== undefined && requestSessionId !== sessionId) return;
+  if (structuredOutputCaptured) {
+    getLog().debug({ sessionId }, 'opencode.permission_after_output_ignored');
+    return;
+  }
+  const kind = typeof properties.type === 'string' && properties.type ? properties.type : 'unknown';
+  const rawPatterns = Array.isArray(properties.pattern)
+    ? properties.pattern
+    : properties.pattern === undefined
+      ? []
+      : [properties.pattern];
+  const patterns = rawPatterns.filter((pattern): pattern is string => typeof pattern === 'string');
+  const permissionId = typeof properties.id === 'string' ? properties.id : undefined;
+  getLog().warn({ sessionId, permissionId, kind }, 'opencode.permission_required');
+  throw new OpencodePermissionRequiredError({ permissionId, kind, patterns });
+}
+
 export async function* streamOpencodeSession(
   client: OpencodeClientLike,
   cwd: string,
@@ -154,6 +215,10 @@ export async function* streamOpencodeSession(
   const streamController = new AbortController();
   const seenToolCalls = new Set<string>();
   const completedToolCalls = new Set<string>();
+  // A completed `StructuredOutput` tool call means the required payload is already in hand
+  // (readStructuredOutput will find it at idle), so a later permission ask for some *other*
+  // tool must not fail the step (see checkPermissionEvent).
+  let structuredOutputCaptured = false;
   let latestAssistantInfo: Record<string, unknown> | undefined;
   let lastAssistantMessageId: string | undefined;
   let aborted = requestOptions?.abortSignal?.aborted === true;
@@ -192,6 +257,11 @@ export async function* streamOpencodeSession(
             lastAssistantMessageId = info.id;
           }
         }
+        continue;
+      }
+
+      if (event.type === 'permission.updated') {
+        checkPermissionEvent(event.type, properties, sessionId, structuredOutputCaptured);
         continue;
       }
 
@@ -239,6 +309,7 @@ export async function* streamOpencodeSession(
           if (callId && !completedToolCalls.has(callId)) {
             if (status === 'completed') {
               completedToolCalls.add(callId);
+              if (toolName === 'StructuredOutput') structuredOutputCaptured = true;
               yield {
                 type: 'tool_result',
                 toolName,
