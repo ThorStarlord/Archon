@@ -229,7 +229,7 @@ export async function* streamMultiAgentOpencodeSession(
         continue;
       }
 
-      if (event.type === 'permission.updated') {
+      if (event.type === 'permission.updated' || event.type === 'permission.asked') {
         const requestSessionId =
           typeof properties.sessionID === 'string' ? properties.sessionID : undefined;
         const target = requestSessionId ? sessionToAgent.get(requestSessionId) : undefined;

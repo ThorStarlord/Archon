@@ -810,6 +810,92 @@ describe('OpencodeProvider', () => {
     expect(runtime.client.session.promptAsync).toHaveBeenCalledTimes(1);
   });
 
+  test('runtime permission.asked request fails the step immediately', async () => {
+    const runtime = makeRuntime({});
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'message-1',
+            role: 'assistant',
+            sessionID: 'session-1',
+          },
+        },
+      },
+      {
+        type: 'permission.asked',
+        properties: {
+          id: 'per-runtime-1',
+          permission: 'external_directory',
+          patterns: ['C:\\work\\artifacts\\*'],
+          sessionID: 'session-1',
+          metadata: {},
+          always: [],
+        },
+      },
+      {
+        type: 'session.idle',
+        properties: { sessionID: 'session-1' },
+      },
+    ];
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('hi', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+      })
+    );
+
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('provider_failure:permission');
+    expect(error?.message).toContain('external_directory');
+    expect(error?.message).toContain('C:\\work\\artifacts\\*');
+    expect(error?.message).toContain('OPENCODE_CONFIG');
+    expect(runtime.client.session.promptAsync).toHaveBeenCalledTimes(1);
+  });
+
+  test('multi-agent runtime permission.asked fails the step immediately', async () => {
+    const cwd = await createTempProjectDir();
+    const sessionIds = ['scout-session', 'reviewer-session'];
+    const runtime = makeRuntime({
+      sessionCreate: mock(async () => ({ data: { id: sessionIds.shift() } })),
+    });
+    runtimeQueue.push(runtime);
+    scriptedEvents = [
+      {
+        type: 'permission.asked',
+        properties: {
+          id: 'per-runtime-multi-1',
+          permission: 'external_directory',
+          patterns: ['C:\\work\\artifacts\\*'],
+          sessionID: 'scout-session',
+          metadata: {},
+          always: [],
+        },
+      },
+    ];
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('hi', cwd, undefined, {
+        assistantConfig: TEST_MODEL,
+        nodeConfig: {
+          nodeId: 'research',
+          agents: {
+            scout: { description: 'Scout', prompt: 'Explore' },
+            reviewer: { description: 'Reviewer', prompt: 'Review' },
+          },
+        },
+      })
+    );
+
+    expect(error).toBeDefined();
+    expect(error?.message).toContain('provider_failure:permission');
+    expect(error?.message).toContain('external_directory');
+    expect(error?.message).toContain('C:\\work\\artifacts\\*');
+    expect(error?.message).toContain('OPENCODE_CONFIG');
+  });
+
   test('permission request for another session is ignored', async () => {
     const runtime = makeRuntime({
       sessionMessage: mock(async () => ({ data: { info: {} } })),

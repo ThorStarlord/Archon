@@ -183,7 +183,7 @@ export function checkPermissionEvent(
   sessionId: string | undefined,
   structuredOutputCaptured: boolean
 ): void {
-  if (eventType !== 'permission.updated') return;
+  if (eventType !== 'permission.updated' && eventType !== 'permission.asked') return;
   const requestSessionId =
     typeof properties.sessionID === 'string' ? properties.sessionID : undefined;
   if (requestSessionId !== undefined && requestSessionId !== sessionId) return;
@@ -191,15 +191,27 @@ export function checkPermissionEvent(
     getLog().debug({ sessionId }, 'opencode.permission_after_output_ignored');
     return;
   }
-  const kind = typeof properties.type === 'string' && properties.type ? properties.type : 'unknown';
-  const rawPatterns = Array.isArray(properties.pattern)
-    ? properties.pattern
-    : properties.pattern === undefined
+
+  // OpenCode's live 1.18.x runtime emits permission.asked with
+  // permission/patterns. Older generated SDK types expose permission.updated
+  // with type/pattern. Accept both shapes at this compatibility boundary.
+  const kind =
+    typeof properties.permission === 'string' && properties.permission
+      ? properties.permission
+      : typeof properties.type === 'string' && properties.type
+        ? properties.type
+        : 'unknown';
+  const rawPatterns = properties.patterns !== undefined ? properties.patterns : properties.pattern;
+  const patternValues = Array.isArray(rawPatterns)
+    ? rawPatterns
+    : rawPatterns === undefined
       ? []
-      : [properties.pattern];
-  const patterns = rawPatterns.filter((pattern): pattern is string => typeof pattern === 'string');
+      : [rawPatterns];
+  const patterns = patternValues.filter(
+    (pattern): pattern is string => typeof pattern === 'string'
+  );
   const permissionId = typeof properties.id === 'string' ? properties.id : undefined;
-  getLog().warn({ sessionId, permissionId, kind }, 'opencode.permission_required');
+  getLog().warn({ sessionId, permissionId, kind, eventType }, 'opencode.permission_required');
   throw new OpencodePermissionRequiredError({ permissionId, kind, patterns });
 }
 
@@ -260,7 +272,7 @@ export async function* streamOpencodeSession(
         continue;
       }
 
-      if (event.type === 'permission.updated') {
+      if (event.type === 'permission.updated' || event.type === 'permission.asked') {
         checkPermissionEvent(event.type, properties, sessionId, structuredOutputCaptured);
         continue;
       }
