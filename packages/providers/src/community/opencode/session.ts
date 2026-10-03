@@ -203,8 +203,14 @@ export function checkPermissionEvent(
         : 'unknown';
   const rawPatterns =
     properties.patterns !== undefined ? properties.patterns : properties.pattern;
-  const patterns = (Array.isArray(rawPatterns) ? rawPatterns : rawPatterns === undefined ? [] : [rawPatterns])
-    .filter((pattern): pattern is string => typeof pattern === 'string');
+  const patternValues = Array.isArray(rawPatterns)
+    ? rawPatterns
+    : rawPatterns === undefined
+      ? []
+      : [rawPatterns];
+  const patterns = patternValues.filter(
+    (pattern): pattern is string => typeof pattern === 'string'
+  );
   const permissionId = typeof properties.id === 'string' ? properties.id : undefined;
   getLog().warn({ sessionId, permissionId, kind, eventType }, 'opencode.permission_required');
   throw new OpencodePermissionRequiredError({ permissionId, kind, patterns });
