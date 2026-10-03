@@ -1,0 +1,48 @@
+name: F16 OpenCode Permission Qualification
+
+on:
+  push:
+    branches:
+      - qualification/f16-opencode-permission-asked
+  pull_request:
+    branches:
+      - df/pin-4eb8bbb
+
+env:
+  BUN_VERSION: '1.4.2'
+
+jobs:
+  provider-repair:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Show Prettier delta for repaired session
+        shell: bash
+        run: |
+          bun x prettier packages/providers/src/community/opencode/session.ts > /tmp/session.formatted.ts
+          diff -u packages/providers/src/community/opencode/session.ts /tmp/session.formatted.ts || true
+
+      - name: Run focused OpenCode provider tests
+        run: bun test packages/providers/src/community/opencode/provider.test.ts
+
+      - name: Type check provider package
+        run: bun --filter @archon/providers type-check
+
+      - name: Lint
+        run: bun run lint --max-warnings 0
+
+      - name: Check formatting
+        run: bun run format:check
