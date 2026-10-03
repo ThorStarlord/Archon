@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - qualification/f16-opencode-permission-asked
+  pull_request:
+    branches:
+      - df/pin-4eb8bbb
 
 env:
   BUN_VERSION: '1.4.2'
