@@ -29,6 +29,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Show Prettier delta for repaired session
+        shell: bash
+        run: |
+          bun x prettier packages/providers/src/community/opencode/session.ts > /tmp/session.formatted.ts
+          diff -u packages/providers/src/community/opencode/session.ts /tmp/session.formatted.ts || true
+
       - name: Run focused OpenCode provider tests
         run: bun test packages/providers/src/community/opencode/provider.test.ts
 
