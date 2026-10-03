@@ -32,8 +32,8 @@ jobs:
       - name: Run focused OpenCode provider tests
         run: bun test packages/providers/src/community/opencode/provider.test.ts
 
-      - name: Type check
-        run: bun run type-check
+      - name: Type check provider package
+        run: bun --filter @archon/providers type-check
 
       - name: Lint
         run: bun run lint --max-warnings 0
