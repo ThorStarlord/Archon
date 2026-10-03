@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode permission fail-fast recognizes the live runtime event shape.** OpenCode 1.18.x
+  emits `permission.asked` with `permission` / `patterns`, while the older generated SDK
+  compatibility type used `permission.updated` with `type` / `pattern`. The provider now
+  accepts both forms, preserving the existing no-auto-approve fail-fast behavior instead of
+  silently waiting for the node idle timeout.
+
 - **OpenCode steps fail fast on unanswered permission requests instead of hanging.** The
   OpenCode provider treated a turn as finished only on `session.idle` and ignored OpenCode
   `permission.updated` events, so a tool needing approval (e.g. `external_directory`, which
