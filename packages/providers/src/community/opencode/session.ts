@@ -201,8 +201,7 @@ export function checkPermissionEvent(
       : typeof properties.type === 'string' && properties.type
         ? properties.type
         : 'unknown';
-  const rawPatterns =
-    properties.patterns !== undefined ? properties.patterns : properties.pattern;
+  const rawPatterns = properties.patterns !== undefined ? properties.patterns : properties.pattern;
   const patternValues = Array.isArray(rawPatterns)
     ? rawPatterns
     : rawPatterns === undefined
