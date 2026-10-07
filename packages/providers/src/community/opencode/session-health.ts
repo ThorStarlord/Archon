@@ -28,7 +28,9 @@ export type SessionRestartReason = 'context_boundary' | 'degraded_generation';
 export class OpencodeSessionRestartError extends Error {
   constructor(
     readonly reason: SessionRestartReason,
-    readonly detail: string
+    readonly detail: string,
+    /** The session that was ended; a read-only exploration is finalized in it. */
+    readonly sessionId?: string
   ) {
     super(`OpenCode session ended for restart (${reason}): ${detail}`);
     this.name = 'OpencodeSessionRestartError';
@@ -98,3 +100,15 @@ export const TOOL_HYGIENE_GUIDANCE =
   'argument; split large files into several smaller operations; keep shell commands simple ' +
   'and avoid deeply nested quoting. If a tool call is rejected as invalid, retry once with ' +
   'simpler, smaller arguments instead of repeating it.';
+
+/**
+ * Sent to a read-only exploration that spent its context budget. A restart would only re-read
+ * the same files, so the session is asked to conclude. An inconclusive answer is legitimate;
+ * a guess is not.
+ */
+export const FINALIZE_PROMPT =
+  'The context budget for this investigation is spent. Stop exploring now and do not call ' +
+  'any tool other than StructuredOutput. Using only what you have already read, produce the ' +
+  'final structured output required by the schema. If the evidence does not support a firm ' +
+  'conclusion, say so honestly in the fields the schema provides (an inconclusive result is ' +
+  'valid); do not guess or invent findings.';

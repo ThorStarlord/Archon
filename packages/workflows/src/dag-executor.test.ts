@@ -13467,6 +13467,40 @@ describe('executeDagWorkflow -- terminal node output selection', () => {
     expect(error).toContain("Condition reference '$producer.output.route' resolved to an object");
   });
 
+  it('tells the provider a mutates_checkout:false node is read-only, and only that node', async () => {
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield { type: 'result', sessionId: 's', structuredOutput: { ok: true } };
+    });
+    const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] };
+
+    for (const mutates of [false, undefined] as const) {
+      mockSendQueryDag.mockClear();
+      await executeDagWorkflow(
+        dagOptions({
+          deps: createMockDeps(createMockStore()),
+          platform: createMockPlatform(),
+          cwd: testDir,
+          workflow: {
+            name: 'read-only-flag',
+            nodes: [
+              {
+                id: 'n',
+                kind: 'agent',
+                source: { kind: 'inline', prompt: 'look' },
+                output_format: schema,
+                ...(mutates === undefined ? {} : { mutates_checkout: mutates }),
+                retry: { max_attempts: 0 },
+              },
+            ],
+          },
+          workflowRun: makeWorkflowRun(),
+        })
+      );
+      const options = mockSendQueryDag.mock.calls[0][3] as { readOnly?: boolean };
+      expect(options.readOnly).toBe(mutates === false ? true : undefined);
+    }
+  });
+
   describe('enforced provider with a fresh-session reask budget (OpenCode)', () => {
     const schema = {
       type: 'object',

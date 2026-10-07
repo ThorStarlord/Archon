@@ -23,7 +23,11 @@ import {
   releaseEmbeddedRuntime,
 } from './runtime';
 import { resolveSessionId, streamOpencodeSession } from './session';
-import { MAX_SESSION_RESTARTS, OpencodeSessionRestartError } from './session-health';
+import {
+  FINALIZE_PROMPT,
+  MAX_SESSION_RESTARTS,
+  OpencodeSessionRestartError,
+} from './session-health';
 import { withResumedOutcome, resumedOutcome } from '../../shared/resumed';
 
 export { parseModelRef } from './config';
@@ -152,6 +156,7 @@ export class OpencodeProvider implements IAgentProvider {
     let lastError: Error | undefined;
     let recoveredAgentNotFound = false;
     let sessionRestarts = 0;
+    let finalizing = false;
     let effectivePrompt = prompt;
     let effectiveResumeSessionId = resumeSessionId;
 
@@ -234,12 +239,38 @@ export class OpencodeProvider implements IAgentProvider {
             sessionId,
             effectivePrompt,
             parsedModel,
-            requestOptions
+            requestOptions,
+            { ignoreContextBoundary: finalizing }
           ),
           resumedOutcome(resumeSessionId, resumed)
         );
         return;
       } catch (error) {
+        if (
+          error instanceof OpencodeSessionRestartError &&
+          error.reason === 'context_boundary' &&
+          requestOptions?.readOnly === true &&
+          requestOptions.outputFormat !== undefined &&
+          error.sessionId !== undefined &&
+          !finalizing
+        ) {
+          // A read-only exploration has nothing on disk to carry into a fresh session; a restart
+          // would re-read the same files and hit the boundary again. Ask the same session to
+          // conclude with what it has read, once. Not a restart and not a transport retry.
+          finalizing = true;
+          getLog().warn(
+            { sessionId: error.sessionId, detail: error.detail },
+            'opencode.read_only_finalize'
+          );
+          yield {
+            type: 'system',
+            content: `⚠️ Context budget spent on a read-only node (${error.detail}) — asking the session to conclude.`,
+          };
+          effectivePrompt = FINALIZE_PROMPT;
+          effectiveResumeSessionId = error.sessionId;
+          attempt -= 1;
+          continue;
+        }
         if (error instanceof OpencodeSessionRestartError) {
           // A deliberate, bounded stop (context boundary or degraded generation): continue
           // in a fresh session over the same working tree. Not a transport retry, so it does

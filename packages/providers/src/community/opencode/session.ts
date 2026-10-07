@@ -231,7 +231,11 @@ export async function* streamOpencodeSession(
   sessionId: string,
   prompt: string,
   model: { providerID: string; modelID: string },
-  requestOptions: SendQueryOptions | undefined
+  requestOptions: SendQueryOptions | undefined,
+  options?: {
+    /** The final conclude-now turn of a read-only exploration: the context is over budget by design. */
+    ignoreContextBoundary?: boolean;
+  }
 ): AsyncGenerator<MessageChunk> {
   const events = await client.event.subscribe({ query: { directory: cwd } });
   const streamController = new AbortController();
@@ -246,7 +250,7 @@ export async function* streamOpencodeSession(
   let aborted = requestOptions?.abortSignal?.aborted === true;
   let resultYielded = false;
   const health = new GenerationHealth();
-  const boundary = contextBoundaryTokens();
+  const boundary = options?.ignoreContextBoundary === true ? 0 : contextBoundaryTokens();
 
   const abortHandler = (): void => {
     aborted = true;
@@ -300,7 +304,8 @@ export async function* streamOpencodeSession(
             await endSessionForRestart(
               new OpencodeSessionRestartError(
                 'context_boundary',
-                `context reached ${String(used)} tokens (boundary ${String(boundary)})`
+                `context reached ${String(used)} tokens (boundary ${String(boundary)})`,
+                sessionId
               )
             );
           }
@@ -368,7 +373,7 @@ export async function* streamOpencodeSession(
               };
               if (degraded && !structuredOutputCaptured) {
                 await endSessionForRestart(
-                  new OpencodeSessionRestartError('degraded_generation', degraded)
+                  new OpencodeSessionRestartError('degraded_generation', degraded, sessionId)
                 );
               }
             } else if (status === 'error') {
@@ -384,7 +389,7 @@ export async function* streamOpencodeSession(
               };
               if (degraded && !structuredOutputCaptured) {
                 await endSessionForRestart(
-                  new OpencodeSessionRestartError('degraded_generation', degraded)
+                  new OpencodeSessionRestartError('degraded_generation', degraded, sessionId)
                 );
               }
             }
