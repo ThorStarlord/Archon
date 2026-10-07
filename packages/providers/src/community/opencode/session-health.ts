@@ -107,8 +107,9 @@ export const TOOL_HYGIENE_GUIDANCE =
  * a guess is not.
  */
 export const FINALIZE_PROMPT =
-  'The context budget for this investigation is spent. Stop exploring now and do not call ' +
-  'any tool other than StructuredOutput. Using only what you have already read, produce the ' +
-  'final structured output required by the schema. If the evidence does not support a firm ' +
-  'conclusion, say so honestly in the fields the schema provides (an inconclusive result is ' +
-  'valid); do not guess or invent findings.';
+  'The context budget for this investigation is spent. Stop exploring now: do not read or ' +
+  'search any more. If your task requires you to write a report or other deliverable file, ' +
+  'write it now from what you have already read, in a single bounded write. Then call ' +
+  'StructuredOutput with the final result required by the schema. If the evidence does not ' +
+  'support a firm conclusion, say so honestly in the fields the schema provides (an ' +
+  'inconclusive result is valid); do not guess or invent findings.';
