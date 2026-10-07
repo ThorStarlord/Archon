@@ -133,6 +133,7 @@ mock.module('@opencode-ai/sdk', () => ({
 
 import { OpencodeProvider, resetEmbeddedRuntime } from './provider';
 import { classifyOpencodeError } from './errors';
+import { TOOL_HYGIENE_GUIDANCE } from './session-health';
 import type { NodeConfig } from '../../types';
 
 /** Default model for tests — satisfies the model-or-agent validation */
@@ -609,6 +610,7 @@ describe('OpencodeProvider', () => {
           type: 'json_schema',
           schema: { type: 'object', properties: { answer: { type: 'string' } } },
         },
+        system: TOOL_HYGIENE_GUIDANCE,
       },
     });
     expect(chunks).toEqual([
@@ -1956,5 +1958,176 @@ describe('classifyOpencodeError (#2715)', () => {
       'rate_limit'
     );
     expect(classifyOpencodeError(new Error('server overloaded'), false)).toBe('rate_limit');
+  });
+});
+
+describe('OpencodeProvider session health (Flash robustness)', () => {
+  // A test that queues more sessions than it uses must not leak them into the next test.
+  afterEach(() => {
+    runtimeQueue.length = 0;
+  });
+
+  const invalidTool = (id: string): OpencodeEvent => ({
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        sessionID: 'session-1',
+        type: 'tool',
+        callID: id,
+        tool: 'invalid',
+        state: { status: 'completed', input: {}, output: 'The arguments provided are invalid' },
+      },
+    },
+  });
+  const goodTool = (id: string): OpencodeEvent => ({
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        sessionID: 'session-1',
+        type: 'tool',
+        callID: id,
+        tool: 'read',
+        state: { status: 'completed', input: { filePath: 'a' }, output: 'ok' },
+      },
+    },
+  });
+  const assistantTokens = (input: number): OpencodeEvent => ({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'm',
+        role: 'assistant',
+        sessionID: 'session-1',
+        tokens: { input, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    },
+  });
+  const idle: OpencodeEvent = { type: 'session.idle', properties: { sessionID: 'session-1' } };
+
+  /** One runtime (one session attempt) per script: each restart acquires a fresh runtime. */
+  function queueSessions(scripts: OpencodeEvent[][]): MockRuntime[] {
+    const runtimes = scripts.map(script =>
+      makeRuntime({ subscribe: mock(async () => ({ stream: createEventStream(script) })) })
+    );
+    runtimeQueue.push(...runtimes);
+    return runtimes;
+  }
+
+  const promptText = (runtime: MockRuntime | undefined): string => {
+    const arg = runtime?.client.session.promptAsync.mock.calls[0]?.[0] as
+      | { body: { parts: { text: string }[] } }
+      | undefined;
+    return arg?.body.parts[0]?.text ?? '';
+  };
+  const prompted = (runtimes: MockRuntime[]): number =>
+    runtimes.filter(r => r.client.session.promptAsync.mock.calls.length > 0).length;
+
+  test('two consecutive malformed tool calls end the session and restart it fresh', async () => {
+    const rts = queueSessions([[invalidTool('a'), invalidTool('b')], [idle]]);
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('do the task', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(rts[0]?.client.session.abort).toHaveBeenCalled();
+    expect(prompted(rts)).toBe(2);
+    expect(promptText(rts[0])).toBe('do the task');
+    expect(promptText(rts[1])).toContain('do the task');
+    expect(promptText(rts[1])).toContain('SESSION RESTART 1/2');
+    expect(promptText(rts[1])).toContain('consecutive malformed tool calls');
+    expect(
+      (chunks as { type?: string; content?: unknown }[]).some(
+        c => c.type === 'system' && String(c.content).includes('Restarting')
+      )
+    ).toBe(true);
+    expect(chunks.at(-1)).toEqual({ type: 'result', sessionId: 'session-1' });
+  });
+
+  test('a healthy session is not restarted', async () => {
+    const rts = queueSessions([
+      [goodTool('a'), invalidTool('b'), goodTool('c'), assistantTokens(60_000), idle],
+    ]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(error).toBeUndefined();
+    expect(prompted(rts)).toBe(1);
+    expect(rts[0]?.client.session.abort).not.toHaveBeenCalled();
+  });
+
+  test('three malformed calls inside the window restart even when not consecutive', async () => {
+    const rts = queueSessions([
+      [invalidTool('a'), goodTool('b'), invalidTool('c'), goodTool('d'), invalidTool('e')],
+      [idle],
+    ]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(error).toBeUndefined();
+    expect(prompted(rts)).toBe(2);
+    expect(promptText(rts[1])).toContain('3 malformed tool calls');
+  });
+
+  test('crossing the context boundary restarts in a fresh session', async () => {
+    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(error).toBeUndefined();
+    expect(prompted(rts)).toBe(2);
+    expect(promptText(rts[1])).toContain('context reached 100000 tokens');
+  });
+
+  test('the boundary can be disabled for tuning', async () => {
+    process.env.ARCHON_OPENCODE_CONTEXT_BOUNDARY_TOKENS = '0';
+    try {
+      const rts = queueSessions([[assistantTokens(500_000), idle]]);
+      const { error } = await consume(
+        new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+      );
+      expect(error).toBeUndefined();
+      expect(prompted(rts)).toBe(1);
+    } finally {
+      delete process.env.ARCHON_OPENCODE_CONTEXT_BOUNDARY_TOKENS;
+    }
+  });
+
+  test('restarts are bounded and then fail with a stable marker', async () => {
+    const bad = [invalidTool('a'), invalidTool('b')];
+    const rts = queueSessions([bad, bad, bad, bad]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(String((error as Error | undefined)?.message)).toContain(
+      'provider_failure:session_unhealthy'
+    );
+    // 1 original + 2 restarts, never more.
+    expect(prompted(rts)).toBe(3);
+  });
+
+  test('restarts do not consume the transport retry budget', async () => {
+    const rts = queueSessions([
+      [invalidTool('a'), invalidTool('b')],
+      [invalidTool('c'), invalidTool('d')],
+      [idle],
+    ]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
+    );
+
+    expect(error).toBeUndefined();
+    expect(prompted(rts)).toBe(3);
   });
 });

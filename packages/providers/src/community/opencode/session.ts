@@ -10,6 +10,14 @@ import {
 } from './agent-config';
 import { errorMessage } from './errors';
 import type { OpencodeClientLike } from './runtime';
+import {
+  GenerationHealth,
+  OpencodeSessionRestartError,
+  TOOL_HYGIENE_GUIDANCE,
+  contextBoundaryTokens,
+  contextTokens,
+  isMalformedToolCall,
+} from './session-health';
 import { normalizeTokens } from './tokens';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -66,7 +74,9 @@ export function createSessionPromptBody(
     model: adaptedAgentConfig?.model ?? model,
     ...(adaptedAgentConfig?.agent ? { agent: adaptedAgentConfig.agent } : {}),
     ...(adaptedAgentConfig?.tools ? { tools: adaptedAgentConfig.tools } : {}),
-    ...(requestOptions?.systemPrompt ? { system: requestOptions.systemPrompt } : {}),
+    system: [requestOptions?.systemPrompt, TOOL_HYGIENE_GUIDANCE]
+      .filter((part): part is string => typeof part === 'string' && part.length > 0)
+      .join('\n\n'),
   };
 
   if (requestOptions?.outputFormat?.type === 'json_schema') {
@@ -235,6 +245,8 @@ export async function* streamOpencodeSession(
   let lastAssistantMessageId: string | undefined;
   let aborted = requestOptions?.abortSignal?.aborted === true;
   let resultYielded = false;
+  const health = new GenerationHealth();
+  const boundary = contextBoundaryTokens();
 
   const abortHandler = (): void => {
     aborted = true;
@@ -249,6 +261,21 @@ export async function* streamOpencodeSession(
   requestOptions?.abortSignal?.addEventListener('abort', abortHandler, {
     once: true,
   });
+
+  // Stop the running turn and surface a typed restart request. The abort is best effort:
+  // the caller starts a fresh session either way.
+  const endSessionForRestart = async (restart: OpencodeSessionRestartError): Promise<never> => {
+    getLog().warn(
+      { sessionId, reason: restart.reason, detail: restart.detail },
+      'opencode.session_restart_requested'
+    );
+    await client.session
+      .abort({ path: { id: sessionId }, query: { directory: cwd } })
+      .catch((error): void => {
+        getLog().debug({ err: error, sessionId }, 'opencode.session_abort_failed');
+      });
+    throw restart;
+  };
 
   try {
     const promptBody = createSessionPromptBody(prompt, model, requestOptions);
@@ -267,6 +294,15 @@ export async function* streamOpencodeSession(
           latestAssistantInfo = info;
           if (typeof info.id === 'string') {
             lastAssistantMessageId = info.id;
+          }
+          const used = contextTokens(info);
+          if (boundary > 0 && used >= boundary && !structuredOutputCaptured) {
+            await endSessionForRestart(
+              new OpencodeSessionRestartError(
+                'context_boundary',
+                `context reached ${String(used)} tokens (boundary ${String(boundary)})`
+              )
+            );
           }
         }
         continue;
@@ -322,6 +358,7 @@ export async function* streamOpencodeSession(
             if (status === 'completed') {
               completedToolCalls.add(callId);
               if (toolName === 'StructuredOutput') structuredOutputCaptured = true;
+              const degraded = health.record(isMalformedToolCall(toolName, status, undefined));
               yield {
                 type: 'tool_result',
                 toolName,
@@ -329,15 +366,27 @@ export async function* streamOpencodeSession(
                 ...(callId ? { toolCallId: callId } : {}),
                 toolOutcome: 'success',
               };
+              if (degraded && !structuredOutputCaptured) {
+                await endSessionForRestart(
+                  new OpencodeSessionRestartError('degraded_generation', degraded)
+                );
+              }
             } else if (status === 'error') {
               completedToolCalls.add(callId);
+              const errorText = typeof state?.error === 'string' ? state.error : undefined;
+              const degraded = health.record(isMalformedToolCall(toolName, status, errorText));
               yield {
                 type: 'tool_result',
                 toolName,
-                toolOutput: typeof state?.error === 'string' ? state.error : 'Tool failed',
+                toolOutput: errorText ?? 'Tool failed',
                 ...(callId ? { toolCallId: callId } : {}),
                 toolOutcome: 'error',
               };
+              if (degraded && !structuredOutputCaptured) {
+                await endSessionForRestart(
+                  new OpencodeSessionRestartError('degraded_generation', degraded)
+                );
+              }
             }
           }
         }

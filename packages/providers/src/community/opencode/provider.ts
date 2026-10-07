@@ -1,4 +1,6 @@
+import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { createLogger } from '@archon/paths';
 
@@ -21,6 +23,7 @@ import {
   releaseEmbeddedRuntime,
 } from './runtime';
 import { resolveSessionId, streamOpencodeSession } from './session';
+import { MAX_SESSION_RESTARTS, OpencodeSessionRestartError } from './session-health';
 import { withResumedOutcome, resumedOutcome } from '../../shared/resumed';
 
 export { parseModelRef } from './config';
@@ -34,6 +37,62 @@ let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
   if (!cachedLog) cachedLog = createLogger('provider.opencode');
   return cachedLog;
+}
+
+const execFileAsync = promisify(execFile);
+const GIT_STATE_MAX_CHARS = 4000;
+
+/**
+ * The deterministic state a restarted session must continue from: the working tree itself.
+ * Best effort (a non-git directory simply yields no state) and capped so the re-grounding
+ * note cannot itself bloat the fresh context.
+ */
+async function worktreeState(cwd: string): Promise<string> {
+  const run = async (args: string[]): Promise<string> => {
+    try {
+      const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+        timeout: 15_000,
+        maxBuffer: 1024 * 1024,
+      });
+      return stdout.trim();
+    } catch {
+      return '';
+    }
+  };
+  const [status, diffStat] = await Promise.all([
+    run(['status', '--short']),
+    run(['diff', '--stat', 'HEAD']),
+  ]);
+  const parts = [
+    status ? `git status --short:\n${status}` : 'git status --short: (clean or unavailable)',
+    diffStat ? `git diff --stat HEAD:\n${diffStat}` : '',
+  ].filter(Boolean);
+  const text = parts.join('\n\n');
+  return text.length > GIT_STATE_MAX_CHARS
+    ? `${text.slice(0, GIT_STATE_MAX_CHARS)}\n... (truncated)`
+    : text;
+}
+
+/** The original task plus an honest account of why the previous session ended. */
+export function buildRestartPrompt(
+  originalPrompt: string,
+  restart: OpencodeSessionRestartError,
+  state: string,
+  restartNumber: number
+): string {
+  const why =
+    restart.reason === 'context_boundary'
+      ? 'the previous agent session grew too large to keep producing reliable tool calls, so it was ended'
+      : 'the previous agent session started producing malformed tool calls, so it was ended';
+  return [
+    originalPrompt,
+    `--- SESSION RESTART ${String(restartNumber)}/${String(MAX_SESSION_RESTARTS)} ---`,
+    `This is a fresh session: ${why} (${restart.detail}). The working directory is the source ` +
+      'of truth. Work already on disk is done; continue the original task from this state ' +
+      'without redoing it. Be selective: search narrowly, read only the ranges you need, ' +
+      'avoid re-reading files, and prefer small targeted edits and bounded writes.',
+    state,
+  ].join('\n\n');
 }
 
 function delay(ms: number): Promise<void> {
@@ -92,6 +151,9 @@ export class OpencodeProvider implements IAgentProvider {
 
     let lastError: Error | undefined;
     let recoveredAgentNotFound = false;
+    let sessionRestarts = 0;
+    let effectivePrompt = prompt;
+    let effectiveResumeSessionId = resumeSessionId;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
       if (requestOptions?.abortSignal?.aborted) {
@@ -156,9 +218,9 @@ export class OpencodeProvider implements IAgentProvider {
         const { sessionId, resumed } = await resolveSessionId(
           runtime.client,
           sessionCwd,
-          resumeSessionId
+          effectiveResumeSessionId
         );
-        if (resumeSessionId && !resumed) {
+        if (effectiveResumeSessionId && !resumed) {
           yield {
             type: 'system',
             content: '⚠️ Could not resume OpenCode session. Starting fresh conversation.',
@@ -170,7 +232,7 @@ export class OpencodeProvider implements IAgentProvider {
             runtime.client,
             sessionCwd,
             sessionId,
-            prompt,
+            effectivePrompt,
             parsedModel,
             requestOptions
           ),
@@ -178,6 +240,36 @@ export class OpencodeProvider implements IAgentProvider {
         );
         return;
       } catch (error) {
+        if (error instanceof OpencodeSessionRestartError) {
+          // A deliberate, bounded stop (context boundary or degraded generation): continue
+          // in a fresh session over the same working tree. Not a transport retry, so it does
+          // not consume the retry budget; MAX_SESSION_RESTARTS bounds it independently.
+          if (sessionRestarts >= MAX_SESSION_RESTARTS) {
+            throw new Error(
+              `OpenCode session restarted ${String(MAX_SESSION_RESTARTS)} times without finishing ` +
+                `(provider_failure:session_unhealthy): ${error.message}`,
+              { cause: error }
+            );
+          }
+          sessionRestarts += 1;
+          getLog().warn(
+            { reason: error.reason, detail: error.detail, restart: sessionRestarts },
+            'opencode.session_restarting'
+          );
+          yield {
+            type: 'system',
+            content: `⚠️ Restarting OpenCode session (${error.reason}: ${error.detail}) — restart ${String(sessionRestarts)}/${String(MAX_SESSION_RESTARTS)}.`,
+          };
+          effectivePrompt = buildRestartPrompt(
+            prompt,
+            error,
+            await worktreeState(sessionCwd),
+            sessionRestarts
+          );
+          effectiveResumeSessionId = undefined;
+          attempt -= 1;
+          continue;
+        }
         const errorClass = classifyOpencodeError(
           error,
           requestOptions?.abortSignal?.aborted === true

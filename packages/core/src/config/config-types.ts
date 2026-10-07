@@ -135,6 +135,14 @@ export interface GlobalConfig {
   aliases?: RawAliasesConfig;
 
   /**
+   * Owner allowlist of `<provider>/<model>` pairs (for example
+   * `opencode/opencode-go/deepseek-v4.1-flash`). When set, every agent query must name a
+   * listed pair; tiers, `--model` overrides, aliases and node models are all checked.
+   * Unset means no restriction.
+   */
+  allowedModels?: string[];
+
+  /**
    * Cross-provider model tier presets accessible as small/medium/large in
    * workflow/node `model:` fields.
    */

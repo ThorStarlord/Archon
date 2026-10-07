@@ -66,6 +66,11 @@ const keyClassifications = {
     kind: 'unavailable',
     reason: 'conversation concurrency is process-scoped and has no per-run consumer',
   },
+  allowedModels: {
+    kind: 'unavailable',
+    reason:
+      'the owner model allowlist is process-scoped and enforced at provider lookup; a run cannot widen it',
+  },
   recommendedWorkflows: {
     kind: 'unavailable',
     reason: 'recommended workflows are listing-only and have no run consumer',

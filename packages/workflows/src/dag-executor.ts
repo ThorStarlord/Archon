@@ -2362,11 +2362,17 @@ async function executeNodeInternal(
   // Best-effort providers (Pi/Copilot) get a bounded validate-and-reask loop: on a
   // structured-output validation miss, re-run the stream with the schema errors
   // appended. Enforced providers and non-output_format nodes get 0 reasks.
-  const maxReasks =
-    getProviderCapabilities(provider).structuredOutput === 'best-effort' &&
-    nodeOptions?.outputFormat
+  // An enforced provider that still misses the schema gets the provider's own small fresh-session
+  // budget, but only on a read-only node: re-running a node that can change the checkout could
+  // repeat its side effects.
+  const providerCapabilities = getProviderCapabilities(provider);
+  const maxReasks = !nodeOptions?.outputFormat
+    ? 0
+    : providerCapabilities.structuredOutput === 'best-effort'
       ? STRUCTURED_OUTPUT_MAX_REASKS
-      : 0;
+      : node.mutates_checkout === false
+        ? (providerCapabilities.freshSessionReasks ?? 0)
+        : 0;
   let accumulatedCostUsd: number | undefined;
   let accumulatedTokens: TokenUsage | undefined;
 
