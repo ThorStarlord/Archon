@@ -2076,7 +2076,7 @@ describe('OpencodeProvider session health (Flash robustness)', () => {
   });
 
   test('crossing the context boundary restarts in a fresh session', async () => {
-    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+    const rts = queueSessions([[assistantTokens(180_000)], [idle]]);
 
     const { error } = await consume(
       new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
@@ -2084,13 +2084,13 @@ describe('OpencodeProvider session health (Flash robustness)', () => {
 
     expect(error).toBeUndefined();
     expect(prompted(rts)).toBe(2);
-    expect(promptText(rts[1])).toContain('context reached 100000 tokens');
+    expect(promptText(rts[1])).toContain('context reached 180000 tokens');
   });
 
   test('the boundary can be disabled for tuning', async () => {
     process.env.ARCHON_OPENCODE_CONTEXT_BOUNDARY_TOKENS = '0';
     try {
-      const rts = queueSessions([[assistantTokens(500_000), idle]]);
+      const rts = queueSessions([[assistantTokens(900_000), idle]]);
       const { error } = await consume(
         new OpencodeProvider().sendQuery('t', '/tmp', undefined, { assistantConfig: TEST_MODEL })
       );
@@ -2170,7 +2170,7 @@ describe('OpencodeProvider read-only finalize at the context boundary', () => {
   };
 
   test('a read-only structured-output node is asked to conclude in the same session', async () => {
-    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+    const rts = queueSessions([[assistantTokens(180_000)], [idle]]);
 
     const { chunks, error } = await consume(
       new OpencodeProvider().sendQuery('investigate', '/tmp', undefined, {
@@ -2196,7 +2196,7 @@ describe('OpencodeProvider read-only finalize at the context boundary', () => {
   });
 
   test('the conclude turn is not itself cut off by the boundary', async () => {
-    const rts = queueSessions([[assistantTokens(100_000)], [assistantTokens(130_000), idle]]);
+    const rts = queueSessions([[assistantTokens(180_000)], [assistantTokens(230_000), idle]]);
 
     const { error } = await consume(
       new OpencodeProvider().sendQuery('investigate', '/tmp', undefined, {
@@ -2211,7 +2211,7 @@ describe('OpencodeProvider read-only finalize at the context boundary', () => {
   });
 
   test('a node that may change the checkout still restarts fresh', async () => {
-    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+    const rts = queueSessions([[assistantTokens(180_000)], [idle]]);
 
     await consume(
       new OpencodeProvider().sendQuery('implement', '/tmp', undefined, {
@@ -2224,7 +2224,7 @@ describe('OpencodeProvider read-only finalize at the context boundary', () => {
   });
 
   test('a read-only node without a structured-output contract still restarts fresh', async () => {
-    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+    const rts = queueSessions([[assistantTokens(180_000)], [idle]]);
 
     await consume(
       new OpencodeProvider().sendQuery('look', '/tmp', undefined, {

@@ -12,8 +12,16 @@
  * same working tree (the filesystem, not a model-written summary, is the source of truth).
  */
 
-/** Context size at which a session is ended and restarted fresh. */
-export const DEFAULT_CONTEXT_BOUNDARY_TOKENS = 100_000;
+/**
+ * Context size at which a session is ended and restarted fresh: a backstop, not a working
+ * budget. Measured on `deepseek-v4.1-flash` sessions (2026-10-07): every session already starts
+ * at 62-67k tokens (system prompt, tools, the work order) before it acts, so a 100k boundary left
+ * ~33k tokens (30-40 tool calls) per session and the restart began at 66k again -- an
+ * implement loop used all three sessions without a single edit. The earlier "degradation from
+ * ~100k" was observed with thinking ON; with thinking off a session reached 124k with 0
+ * malformed calls. Real degradation is caught by the malformed-tool-call breaker below.
+ */
+export const DEFAULT_CONTEXT_BOUNDARY_TOKENS = 180_000;
 /** Fresh sessions a single query may use before it fails. */
 export const MAX_SESSION_RESTARTS = 2;
 /** This many malformed tool calls in a row end the session. */
