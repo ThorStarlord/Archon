@@ -2131,3 +2131,108 @@ describe('OpencodeProvider session health (Flash robustness)', () => {
     expect(prompted(rts)).toBe(3);
   });
 });
+
+describe('OpencodeProvider read-only finalize at the context boundary', () => {
+  const assistantTokens = (input: number): OpencodeEvent => ({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'm',
+        role: 'assistant',
+        sessionID: 'session-1',
+        tokens: { input, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    },
+  });
+  const idle: OpencodeEvent = { type: 'session.idle', properties: { sessionID: 'session-1' } };
+  const FORMAT = {
+    type: 'json_schema' as const,
+    schema: { type: 'object', properties: { rooted: { type: 'boolean' } } },
+  };
+
+  afterEach(() => {
+    runtimeQueue.length = 0;
+  });
+
+  function queueSessions(scripts: OpencodeEvent[][]): MockRuntime[] {
+    const runtimes = scripts.map(script =>
+      makeRuntime({ subscribe: mock(async () => ({ stream: createEventStream(script) })) })
+    );
+    runtimeQueue.push(...runtimes);
+    return runtimes;
+  }
+
+  const firstPrompt = (runtime: MockRuntime | undefined): string => {
+    const arg = runtime?.client.session.promptAsync.mock.calls[0]?.[0] as
+      | { body: { parts: { text: string }[] } }
+      | undefined;
+    return arg?.body.parts[0]?.text ?? '';
+  };
+
+  test('a read-only structured-output node is asked to conclude in the same session', async () => {
+    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+
+    const { chunks, error } = await consume(
+      new OpencodeProvider().sendQuery('investigate', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: FORMAT,
+        readOnly: true,
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(rts[0]?.client.session.abort).toHaveBeenCalled();
+    // The conclude turn resumes the SAME session instead of starting a fresh one.
+    expect(rts[1]?.client.session.get).toHaveBeenCalledWith(
+      expect.objectContaining({ path: { id: 'session-1' } })
+    );
+    expect(firstPrompt(rts[1])).toContain('context budget for this investigation is spent');
+    expect(firstPrompt(rts[1])).not.toContain('SESSION RESTART');
+    expect(
+      (chunks as { type?: string; content?: unknown }[]).some(
+        c => c.type === 'system' && String(c.content).includes('asking the session to conclude')
+      )
+    ).toBe(true);
+  });
+
+  test('the conclude turn is not itself cut off by the boundary', async () => {
+    const rts = queueSessions([[assistantTokens(100_000)], [assistantTokens(130_000), idle]]);
+
+    const { error } = await consume(
+      new OpencodeProvider().sendQuery('investigate', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: FORMAT,
+        readOnly: true,
+      })
+    );
+
+    expect(error).toBeUndefined();
+    expect(rts[1]?.client.session.abort).not.toHaveBeenCalled();
+  });
+
+  test('a node that may change the checkout still restarts fresh', async () => {
+    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+
+    await consume(
+      new OpencodeProvider().sendQuery('implement', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        outputFormat: FORMAT,
+      })
+    );
+
+    expect(firstPrompt(rts[1])).toContain('SESSION RESTART 1/2');
+  });
+
+  test('a read-only node without a structured-output contract still restarts fresh', async () => {
+    const rts = queueSessions([[assistantTokens(100_000)], [idle]]);
+
+    await consume(
+      new OpencodeProvider().sendQuery('look', '/tmp', undefined, {
+        assistantConfig: TEST_MODEL,
+        readOnly: true,
+      })
+    );
+
+    expect(firstPrompt(rts[1])).toContain('SESSION RESTART 1/2');
+  });
+});

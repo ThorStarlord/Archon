@@ -1881,6 +1881,7 @@ async function resolveNodeProviderAndModel(
   if (node.output_format) {
     baseOptions.outputFormat = { type: 'json_schema', schema: node.output_format };
   }
+  if (node.mutates_checkout === false) baseOptions.readOnly = true;
 
   // Build raw nodeConfig — provider translates internally
   const nodeConfig: NodeConfig = {

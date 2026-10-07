@@ -491,6 +491,12 @@ export interface AgentRequestOptions {
   abortSignal?: AbortSignal;
   systemPrompt?: SystemPromptInput;
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
+  /**
+   * The node declared `mutates_checkout: false`: it only reads and reports, so a provider may
+   * safely end an exploration that has used its context budget and ask it to conclude,
+   * instead of restarting it. Absent means the node may change the checkout.
+   */
+  readOnly?: boolean;
   env?: Record<string, string>;
   /**
    * Names in `env` whose values Archon injected as credentials rather than
