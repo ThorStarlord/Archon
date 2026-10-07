@@ -42,6 +42,7 @@ import {
   startOAuth,
   pollOAuth,
   loadConfig,
+  loadGlobalConfig,
   updateGlobalConfig,
   getUserAiPrefs,
   setUserTiers,
@@ -509,6 +510,7 @@ export async function aiTierListCommand(json?: boolean): Promise<number> {
       await writeJsonLine({
         defaultAssistant: config.assistant,
         userDefaultAssistant: userPrefs.defaultProvider ?? null,
+        allowedModels: (await loadGlobalConfig()).allowedModels ?? null,
         tiers: rows,
       });
       return 0;

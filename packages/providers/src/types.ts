@@ -681,6 +681,14 @@ export interface ProviderCapabilities {
    *  - `false`         — the provider cannot produce structured output at all.
    */
   structuredOutput: 'enforced' | 'best-effort' | false;
+  /**
+   * Fresh-session re-asks the executor may spend on a read-only node (`mutates_checkout:
+   * false`) whose structured output is missing or schema-invalid, for a provider whose
+   * `structuredOutput` is `'enforced'`. A re-ask runs in a throwaway session so the invalid
+   * turn is not carried forward, and the schema is never loosened or coerced. Absent means 0.
+   * Mutating nodes never get this: re-running them could repeat side effects.
+   */
+  freshSessionReasks?: number;
   envInjection: boolean;
   costControl: boolean;
   effortControl: boolean;

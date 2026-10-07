@@ -13467,6 +13467,107 @@ describe('executeDagWorkflow -- terminal node output selection', () => {
     expect(error).toContain("Condition reference '$producer.output.route' resolved to an object");
   });
 
+  describe('enforced provider with a fresh-session reask budget (OpenCode)', () => {
+    const schema = {
+      type: 'object',
+      properties: { rooted: { type: 'boolean' }, summary: { type: 'string' } },
+      required: ['rooted', 'summary'],
+    };
+
+    const runNode = async (
+      mutatesCheckout: boolean | undefined
+    ): Promise<{ store: ReturnType<typeof createMockStore> }> => {
+      const store = createMockStore();
+      await executeDagWorkflow(
+        dagOptions({
+          deps: createMockDeps(store),
+          platform: createMockPlatform(),
+          cwd: testDir,
+          workflow: {
+            name: 'opencode-fresh-reask',
+            nodes: [
+              {
+                id: 'investigate',
+                kind: 'agent',
+                source: { kind: 'inline', prompt: 'investigate' },
+                provider: 'opencode',
+                output_format: schema,
+                ...(mutatesCheckout === undefined ? {} : { mutates_checkout: mutatesCheckout }),
+                retry: { max_attempts: 0 },
+              },
+            ],
+          },
+          workflowRun: makeWorkflowRun(),
+          workflowProvider: 'opencode',
+          config: { ...minimalConfig, assistant: 'opencode' },
+        })
+      );
+      return { store };
+    };
+
+    const events = (store: ReturnType<typeof createMockStore>, type: string): unknown[][] =>
+      (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls.filter(
+        (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === type
+      );
+
+    it('re-asks a read-only node once in a fresh session after a schema miss, then completes', async () => {
+      // The Attempt 9 shape: `rooted` came back as a string, which the schema rejects. Nothing is
+      // coerced; the node is simply asked again in a throwaway session.
+      mockSendQueryDag.mockImplementationOnce(async function* () {
+        yield {
+          type: 'result',
+          sessionId: 's1',
+          structuredOutput: { rooted: 'true', summary: 'x' },
+        };
+      });
+      mockSendQueryDag.mockImplementation(async function* () {
+        yield { type: 'result', sessionId: 's2', structuredOutput: { rooted: true, summary: 'x' } };
+      });
+
+      const { store } = await runNode(false);
+
+      expect(mockSendQueryDag.mock.calls.length).toBe(2);
+      // Second call is a fresh session: no resume id.
+      expect(mockSendQueryDag.mock.calls[1][2]).toBeUndefined();
+      expect(events(store, 'node_completed').length).toBe(1);
+      expect(events(store, 'node_failed').length).toBe(0);
+    });
+
+    it('is bounded to one re-ask and then fails on the strict schema', async () => {
+      mockSendQueryDag.mockImplementation(async function* () {
+        yield {
+          type: 'result',
+          sessionId: 's',
+          structuredOutput: { rooted: 'true', summary: 'x' },
+        };
+      });
+
+      const { store } = await runNode(false);
+
+      expect(mockSendQueryDag.mock.calls.length).toBe(2);
+      const failed = events(store, 'node_failed');
+      expect(failed.length).toBe(1);
+      expect(String((failed[0][0] as { data: { error: string } }).data.error)).toContain(
+        'failed schema validation'
+      );
+    });
+
+    it('never re-runs a node that can mutate the checkout', async () => {
+      mockSendQueryDag.mockImplementation(async function* () {
+        yield {
+          type: 'result',
+          sessionId: 's',
+          structuredOutput: { rooted: 'true', summary: 'x' },
+        };
+      });
+
+      const { store } = await runNode(undefined);
+
+      expect(mockSendQueryDag.mock.calls.length).toBe(1);
+      expect(events(store, 'node_failed').length).toBe(1);
+    });
+  });
+
   it('best-effort provider: malformed-then-fixed structured output recovers within reasks', async () => {
     // Attempt 1 returns structured output missing the required `verdict`; the reask
     // loop re-runs and attempt 2 returns valid output → node COMPLETES (not failed).

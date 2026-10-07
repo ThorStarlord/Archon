@@ -30,6 +30,7 @@ export const OPENCODE_CAPABILITIES: ProviderCapabilities = {
   agents: true,
   toolRestrictions: true,
   structuredOutput: 'enforced', // sends format:{json_schema}; reads info.structured_output
+  freshSessionReasks: 1, // one fresh-session retry for read-only nodes that miss the schema
   envInjection: true,
   costControl: false,
   effortControl: false,

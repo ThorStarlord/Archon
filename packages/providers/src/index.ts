@@ -111,3 +111,11 @@ export {
   resolveCopilotBinaryPath,
   fileExists as copilotFileExists,
 } from './community/copilot/binary-resolver';
+
+export {
+  ModelNotAllowedError,
+  assertModelAllowed,
+  getAllowedModels,
+  setAllowedModels,
+  withModelPolicy,
+} from './model-policy';

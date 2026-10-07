@@ -90,6 +90,10 @@ async function registerProviders(): Promise<void> {
     await import('@archon/providers');
   registerBuiltinProviders();
   registerCommunityProviders();
+  // Owner model allowlist: applied before any provider lookup so no route can bypass it.
+  const { setAllowedModels } = await import('@archon/providers');
+  const { loadGlobalConfig } = await import('@archon/core');
+  setAllowedModels((await loadGlobalConfig()).allowedModels);
   providersRegistered = true;
 }
 
